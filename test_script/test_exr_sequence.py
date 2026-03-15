@@ -74,6 +74,7 @@ def depth_to_single_channel(depth):
 def _read_frame_worker(args):
     path, width, height = args
     frame_np = read_exr_rgb(path)
+    frame_np = frame_np / (1.0 + frame_np)  # suppress overbrights
     frame_np = np.clip(linear_to_srgb(frame_np), 0.0, 1.0)
 
     if width is not None and height is not None:
