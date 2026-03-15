@@ -1,5 +1,7 @@
 output/
 models/
+.venv/
+.uvcache/
 ._____temp/
 .vscode/
 *__pycache__/*
