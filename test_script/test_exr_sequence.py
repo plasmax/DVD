@@ -16,9 +16,14 @@ from tqdm import tqdm
 
 from examples.wanvideo.model_training.WanTrainingModule import \
     WanTrainingModule
-from test_script.exr import (filter_frame_range, format_sequence_path,
-                             gather_exr_sequence, linear_to_srgb, read_exr_rgb,
-                             save_depth_exr)
+try:
+    from test_script.exr import (filter_frame_range, format_sequence_path,
+                                 gather_exr_sequence, linear_to_srgb,
+                                 read_exr_rgb, save_depth_exr)
+except ModuleNotFoundError:
+    from exr import (filter_frame_range, format_sequence_path,
+                     gather_exr_sequence, linear_to_srgb, read_exr_rgb,
+                     save_depth_exr)
 
 
 # =============================
