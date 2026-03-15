@@ -217,7 +217,14 @@ def get_window_index(T, window_size, overlap):
 # =============================
 # Core Inference
 # =============================
-def generate_depth_sliced(model, input_rgb, window_size=45, overlap=9, scale_only=False):
+def generate_depth_sliced(
+    model,
+    input_rgb,
+    window_size=45,
+    overlap=9,
+    scale_only=False,
+    trim_frames=16,
+):
     B, T, C, H, W = input_rgb.shape
     depth_windows = get_window_index(T, window_size, overlap)
     print(f"depth_windows {depth_windows}")
@@ -225,7 +232,16 @@ def generate_depth_sliced(model, input_rgb, window_size=45, overlap=9, scale_onl
     depth_res_list = []
 
     for start, end in tqdm(depth_windows, desc="Inferencing Slices"):
-        input_rgb_slice = input_rgb[:, start:end]
+        actual_start = max(0, start - trim_frames)
+        prepended_context = start - actual_start
+        pad_start_count = trim_frames - prepended_context
+
+        input_rgb_slice = input_rgb[:, actual_start:end]
+        if pad_start_count > 0:
+            first_frame = input_rgb_slice[:, :1]
+            start_padding = first_frame.repeat(1, pad_start_count, 1, 1, 1)
+            input_rgb_slice = torch.cat([start_padding, input_rgb_slice], dim=1)
+
         input_rgb_slice, origin_T = pad_time_mod4(input_rgb_slice)
         input_frame = input_rgb_slice.shape[1]
         input_height, input_width = input_rgb_slice.shape[-2:]
@@ -248,7 +264,8 @@ def generate_depth_sliced(model, input_rgb, window_size=45, overlap=9, scale_onl
             denoise_step=model.args.denoise_step,
         )
         depth = depth_to_single_channel(outputs["depth"])
-        depth_res_list.append(depth[:, :origin_T])
+        trimmed_start = min(trim_frames, origin_T)
+        depth_res_list.append(depth[:, trimmed_start:origin_T])
 
     depth_list_aligned = None
     prev_end = None
@@ -361,7 +378,13 @@ def load_exr_data(args):
 
 
 def predict_depth(model, input_tensor, args):
-    depth = generate_depth_sliced(model, input_tensor, args.window_size, args.overlap)[0]
+    depth = generate_depth_sliced(
+        model,
+        input_tensor,
+        args.window_size,
+        args.overlap,
+        trim_frames=args.trim_frames,
+    )[0]
     print(f"depth range shape {depth.min()} - {depth.max()}, shape {depth.shape}")
 
     return depth
@@ -382,6 +405,12 @@ def parse_args():
     parser.add_argument("--height", type=int, default=480)
     parser.add_argument("--width", type=int, default=640)
     parser.add_argument("--overlap", type=int, default=9)
+    parser.add_argument(
+        "--trim_frames",
+        type=int,
+        default=16,
+        help="Warmup frames to prepend and discard from each inference window.",
+    )
     parser.add_argument("--start", type=int)
     parser.add_argument("--end", type=int)
     return parser.parse_args()
@@ -392,6 +421,8 @@ def parse_args():
 # =============================
 def main():
     args = parse_args()
+    if args.trim_frames < 0:
+        raise ValueError(f"trim_frames must be non-negative, got {args.trim_frames}")
     if args.start is not None and args.end is not None and args.start > args.end:
         raise ValueError(f"Invalid frame range: start={args.start} is greater than end={args.end}")
 
