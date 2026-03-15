@@ -45,6 +45,27 @@ def compute_scale_and_shift(curr_frames, ref_frames, mask=None):
     return scale, shift
 
 
+def depth_to_single_channel(depth):
+    if isinstance(depth, torch.Tensor):
+        if depth.ndim != 5:
+            raise ValueError(f"Expected depth output with 5 dims, got shape {tuple(depth.shape)}")
+        if depth.shape[-1] == 1:
+            return depth
+        if depth.shape[-1] != 3:
+            raise ValueError(
+                f"Expected depth output with 1 or 3 channels, got shape {tuple(depth.shape)}"
+            )
+        return depth[..., :1]
+
+    if depth.ndim != 5:
+        raise ValueError(f"Expected depth output with 5 dims, got shape {depth.shape}")
+    if depth.shape[-1] == 1:
+        return depth
+    if depth.shape[-1] != 3:
+        raise ValueError(f"Expected depth output with 1 or 3 channels, got shape {depth.shape}")
+    return depth[..., :1]
+
+
 def _read_frame_worker(args):
     path, width, height = args
     frame_np = read_exr_rgb(path)
@@ -220,7 +241,8 @@ def generate_depth_sliced(model, input_rgb, window_size=45, overlap=9, scale_onl
             tiled=False,
             denoise_step=model.args.denoise_step,
         )
-        depth_res_list.append(outputs["depth"][:, :origin_T])
+        depth = depth_to_single_channel(outputs["depth"])
+        depth_res_list.append(depth[:, :origin_T])
 
     depth_list_aligned = None
     prev_end = None

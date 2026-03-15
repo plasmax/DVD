@@ -44,6 +44,27 @@ def compute_scale_and_shift(curr_frames, ref_frames, mask=None):
     return scale, shift
 
 
+def depth_to_single_channel(depth):
+    if isinstance(depth, torch.Tensor):
+        if depth.ndim != 5:
+            raise ValueError(f"Expected depth output with 5 dims, got shape {tuple(depth.shape)}")
+        if depth.shape[-1] == 1:
+            return depth
+        if depth.shape[-1] != 3:
+            raise ValueError(
+                f"Expected depth output with 1 or 3 channels, got shape {tuple(depth.shape)}"
+            )
+        return depth[..., :1]
+
+    if depth.ndim != 5:
+        raise ValueError(f"Expected depth output with 5 dims, got shape {depth.shape}")
+    if depth.shape[-1] == 1:
+        return depth
+    if depth.shape[-1] != 3:
+        raise ValueError(f"Expected depth output with 1 or 3 channels, got shape {depth.shape}")
+    return depth[..., :1]
+
+
 # =============================
 # Helper: Windowing
 # =============================
@@ -195,7 +216,7 @@ def infer_depth_window(model, input_rgb):
             tiled=False,
             denoise_step=model.args.denoise_step,
         )
-        depth = outputs["depth"][:, :origin_T]
+        depth = depth_to_single_channel(outputs["depth"])[:, :origin_T]
 
     depth_np = depth[0]
     if isinstance(depth_np, torch.Tensor):
