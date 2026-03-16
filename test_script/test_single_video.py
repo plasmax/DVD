@@ -304,7 +304,7 @@ def save_results(depth, origin_fps, args):
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--ckpt", type=str, required=True)
+    parser.add_argument("--ckpt", type=str, default="ckpt", required=False)
     parser.add_argument("--input_video", type=str, required=True)
     parser.add_argument("--output_dir", type=str,
                         default="./inference_results")

@@ -56,6 +56,7 @@ class WanTrainingModule(DiffusionTrainingModule):
             torch_dtype=torch.bfloat16,
             device="cpu",
             model_configs=model_configs,
+            skip_download=True,
         )
 
         # DiT related

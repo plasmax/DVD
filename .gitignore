@@ -4,13 +4,17 @@ models/
 .uvcache/
 ._____temp/
 .vscode/
+.venv/
+.uvcache/
 *__pycache__/*
 *.pyc
 video/
+models
 *.safetensors
 *.pth
 omni/
 pcd/
+saves/
 
 models/
 models_ms/

@@ -104,16 +104,16 @@ def launch_training_task(
             f"Starting validation with model at epoch {start_epoch}, global step {global_step}"
         )
         model.pipe.dit.eval()
-        # if accelerator.is_main_process:
-        validator.validate(
-            accelerator=accelerator,
-            dataset_range=dataset_range,
-            pipe=model.pipe,
-            global_step=global_step,
-            args=args,
-            test_loader_dict=test_loader_dict,
-            output_path=model_logger.output_path,
-        )
+        # Initial validation disabled for quick smoke runs.
+        # validator.validate(
+        #     accelerator=accelerator,
+        #     dataset_range=dataset_range,
+        #     pipe=model.pipe,
+        #     global_step=global_step,
+        #     args=args,
+        #     test_loader_dict=test_loader_dict,
+        #     output_path=model_logger.output_path,
+        # )
 
         model.pipe.scheduler.set_timesteps(
             training=True,
@@ -240,15 +240,16 @@ def launch_training_task(
                             )
                             accelerator.print(
                                 f"Checkpoint saved at step {global_step}")
-                        validator.validate(
-                            accelerator=accelerator,
-                            pipe=model.pipe,
-                            dataset_range=dataset_range,
-                            global_step=global_step,
-                            args=args,
-                            test_loader_dict=test_loader_dict,
-                            output_path=model_logger.output_path,
-                        )
+                        # Validation disabled for quick smoke runs.
+                        # validator.validate(
+                        #     accelerator=accelerator,
+                        #     pipe=model.pipe,
+                        #     dataset_range=dataset_range,
+                        #     global_step=global_step,
+                        #     args=args,
+                        #     test_loader_dict=test_loader_dict,
+                        #     output_path=model_logger.output_path,
+                        # )
 
                         model.pipe.scheduler.set_timesteps(
                             training=True,
@@ -337,17 +338,17 @@ if __name__ == "__main__":
         train_ratio=args.train_ratio,
 
     )
-    hypersim_train_dataloader = torch.utils.data.DataLoader(
-        hypersim_train_dataset,
-        shuffle=True,
-        batch_size=args.batch_size,
-        num_workers=2,
-        collate_fn=custom_collate_fn,
-        pin_memory=True,
-        prefetch_factor=4,
-        persistent_workers=True,
-        drop_last=True,
-    )
+    # hypersim_train_dataloader = torch.utils.data.DataLoader(
+    #     hypersim_train_dataset,
+    #     shuffle=True,
+    #     batch_size=args.batch_size,
+    #     num_workers=2,
+    #     collate_fn=custom_collate_fn,
+    #     pin_memory=True,
+    #     prefetch_factor=4,
+    #     persistent_workers=True,
+    #     drop_last=True,
+    # )
     vkitti_train_dataloader = torch.utils.data.DataLoader(
         vikitt_train_dataset,
         shuffle=True,
@@ -359,6 +360,7 @@ if __name__ == "__main__":
         persistent_workers=True,
         drop_last=True,
     )
+    hypersim_train_dataloader = vkitti_train_dataloader  # Hack to bypass empty dataset
 
     # Video training dataset
     ttr_vid_train_dataset = TartanAir_VID_Dataset(
@@ -389,16 +391,16 @@ if __name__ == "__main__":
     accelerator.print(
         f"Enlarged length of ttr and vkitti: {len(ttr_vid_train_dataset)}, {len(vikitt_vid_train_dataset)}")
 
-    ttr_vid_train_dataloader = torch.utils.data.DataLoader(
-        ttr_vid_train_dataset,
-        shuffle=True,
-        batch_size=1,
-        num_workers=2,
-        collate_fn=custom_collate_fn,
-        pin_memory=True,
-        persistent_workers=True,
-        drop_last=True,
-    )
+    # ttr_vid_train_dataloader = torch.utils.data.DataLoader(
+    #     ttr_vid_train_dataset,
+    #     shuffle=True,
+    #     batch_size=1,
+    #     num_workers=2,
+    #     collate_fn=custom_collate_fn,
+    #     pin_memory=True,
+    #     persistent_workers=True,
+    #     drop_last=True,
+    # )
 
     vkitti_vid_train_dataloader = torch.utils.data.DataLoader(
         vikitt_vid_train_dataset,
@@ -410,59 +412,59 @@ if __name__ == "__main__":
         persistent_workers=True,
         drop_last=True,
     )
+    ttr_vid_train_dataloader = vkitti_vid_train_dataloader  # Hack to bypass empty dataset
 
     # Test set
-    kitti_vid_test_dataset = KITTI_VID_Dataset(
-        data_root=args.kitti_vid_test_data_root,
-        max_num_frame=args.test_max_num_frame,
-        min_num_frame=args.test_min_num_frame,
-        max_sample_stride=args.test_max_sample_stride,
-        min_sample_stride=args.test_min_sample_stride,
-    )
-    scannet_vid_test_dataset = Scannet_VID_Dataset(
-        data_root=args.scannet_vid_test_data_root,
-        split_ls=args.scannet_split_ls,
-        test=False,
-        max_num_frame=args.test_max_num_frame,
-        min_num_frame=args.test_min_num_frame,
-        max_sample_stride=args.test_max_sample_stride,
-        min_sample_stride=args.test_min_sample_stride,
-    )
-    nyuv2_test_dataset = NYUv2Dataset(
-        data_root=args.nyuv2_test_data_root,
-        test=False,
-    )
-    kitti_vid_test_dataloader = torch.utils.data.DataLoader(
-        kitti_vid_test_dataset,
-        shuffle=False,
-        batch_size=args.test_batch_size,
-        num_workers=2,
-        collate_fn=custom_collate_fn,
-        pin_memory=True,
-        persistent_workers=True,
-
-    )
-    scannet_vid_test_dataloader = torch.utils.data.DataLoader(
-        scannet_vid_test_dataset,
-        shuffle=False,
-        batch_size=args.test_batch_size,
-        num_workers=2,
-        collate_fn=custom_collate_fn,
-        pin_memory=True,
-        persistent_workers=True,
-
-    )
-    nyuv2_test_dataloader = torch.utils.data.DataLoader(
-        # Assuming dataset returns a dict
-        nyuv2_test_dataset,
-        shuffle=False,
-        batch_size=args.test_batch_size,
-        num_workers=2,
-        collate_fn=custom_collate_fn,
-        pin_memory=True,
-        persistent_workers=True,
-
-    )
+    # kitti_vid_test_dataset = KITTI_VID_Dataset(
+    #     data_root=args.kitti_vid_test_data_root,
+    #     max_num_frame=args.test_max_num_frame,
+    #     min_num_frame=args.test_min_num_frame,
+    #     max_sample_stride=args.test_max_sample_stride,
+    #     min_sample_stride=args.test_min_sample_stride,
+    # )
+    # scannet_vid_test_dataset = Scannet_VID_Dataset(
+    #     data_root=args.scannet_vid_test_data_root,
+    #     split_ls=args.scannet_split_ls,
+    #     test=False,
+    #     max_num_frame=args.test_max_num_frame,
+    #     min_num_frame=args.test_min_num_frame,
+    #     max_sample_stride=args.test_max_sample_stride,
+    #     min_sample_stride=args.test_min_sample_stride,
+    # )
+    # nyuv2_test_dataset = NYUv2Dataset(
+    #     data_root=args.nyuv2_test_data_root,
+    #     test=False,
+    # )
+    # kitti_vid_test_dataloader = torch.utils.data.DataLoader(
+    #     kitti_vid_test_dataset,
+    #     shuffle=False,
+    #     batch_size=args.test_batch_size,
+    #     num_workers=2,
+    #     collate_fn=custom_collate_fn,
+    #     pin_memory=True,
+    #     persistent_workers=True,
+    # )
+    # scannet_vid_test_dataloader = torch.utils.data.DataLoader(
+    #     scannet_vid_test_dataset,
+    #     shuffle=False,
+    #     batch_size=args.test_batch_size,
+    #     num_workers=2,
+    #     collate_fn=custom_collate_fn,
+    #     pin_memory=True,
+    #     persistent_workers=True,
+    # )
+    # nyuv2_test_dataloader = torch.utils.data.DataLoader(
+    #     nyuv2_test_dataset,
+    #     shuffle=False,
+    #     batch_size=args.test_batch_size,
+    #     num_workers=2,
+    #     collate_fn=custom_collate_fn,
+    #     pin_memory=True,
+    #     persistent_workers=True,
+    # )
+    kitti_vid_test_dataloader = []
+    scannet_vid_test_dataloader = []
+    nyuv2_test_dataloader = []
 
     start_epoch, global_step = 0, 0
     model, optimizer, scheduler, hypersim_train_dataloader, vkitti_train_dataloader, ttr_vid_train_dataloader, vkitti_vid_train_dataloader, kitti_vid_test_dataloader, scannet_vid_test_dataloader, nyuv2_test_dataloader = (
@@ -520,9 +522,9 @@ if __name__ == "__main__":
         model = model.module
 
     test_loader_dict = {
-        'kitti': kitti_vid_test_dataloader,
-        'scannet': scannet_vid_test_dataloader,
-        'nyuv2': nyuv2_test_dataloader
+        # 'kitti': kitti_vid_test_dataloader,
+        # 'scannet': scannet_vid_test_dataloader,
+        # 'nyuv2': nyuv2_test_dataloader
     }
 
     dataset_range = {

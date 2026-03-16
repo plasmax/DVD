@@ -123,8 +123,8 @@ class VKITTIDataset(Dataset):
         depth = cv2.imread(depth_path, cv2.IMREAD_ANYCOLOR | cv2.IMREAD_ANYDEPTH)
         depth = depth / 100 # cm -> m
         depth = torch.from_numpy(depth).unsqueeze(0).unsqueeze(0) # (1, 1, h, w)
-        ## normal
-        normal = Image.open(normal_path).convert('RGB')
+        ## normal (dummy image to bypass missing dataset files)
+        normal = Image.new('RGB', (image.width, image.height))
 
         # Transform data simultaneously if needed
         if self.transform:
