@@ -28,7 +28,8 @@ try:
     from sageattention import sageattn
 
     SAGE_ATTN_AVAILABLE = True
-    print(f"========= Using sage attention, please note that this is for inference speed up only!==========")
+    if not (FLASH_ATTN_2_AVAILABLE or FLASH_ATTN_3_AVAILABLE):
+        print(f"========= Using sage attention, please note that this is for inference speed up only!==========")
 except ModuleNotFoundError:
     SAGE_ATTN_AVAILABLE = False
 

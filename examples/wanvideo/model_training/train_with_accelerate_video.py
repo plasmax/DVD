@@ -338,17 +338,17 @@ if __name__ == "__main__":
         train_ratio=args.train_ratio,
 
     )
-    # hypersim_train_dataloader = torch.utils.data.DataLoader(
-    #     hypersim_train_dataset,
-    #     shuffle=True,
-    #     batch_size=args.batch_size,
-    #     num_workers=2,
-    #     collate_fn=custom_collate_fn,
-    #     pin_memory=True,
-    #     prefetch_factor=4,
-    #     persistent_workers=True,
-    #     drop_last=True,
-    # )
+    hypersim_train_dataloader = torch.utils.data.DataLoader(
+        hypersim_train_dataset,
+        shuffle=True,
+        batch_size=args.batch_size,
+        num_workers=2,
+        collate_fn=custom_collate_fn,
+        pin_memory=True,
+        prefetch_factor=4,
+        persistent_workers=True,
+        drop_last=True,
+    )
     vkitti_train_dataloader = torch.utils.data.DataLoader(
         vikitt_train_dataset,
         shuffle=True,
@@ -360,8 +360,6 @@ if __name__ == "__main__":
         persistent_workers=True,
         drop_last=True,
     )
-    hypersim_train_dataloader = vkitti_train_dataloader  # Hack to bypass empty dataset
-
     # Video training dataset
     ttr_vid_train_dataset = TartanAir_VID_Dataset(
         data_dir=args.train_data_dir_ttr_vid,

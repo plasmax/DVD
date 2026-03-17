@@ -81,15 +81,10 @@ class HypersimImageDepthNormalTransform:
         # shape = 3 * 768 * 1024
         return normal
 
-    def __call__(self, image, depth, normal):
-        # convert the inward normals to outward normals
-        normal[:, :, 0] *= -1
-        if self.align_cam_normal:
-            # align normal towards camera
-            H, W = normal.shape[:2]
-            normal = align_normals(
-                normal, depth, [886.81, 886.81, W/2, H/2], H, W)
+    def empty_normal(self):
+        return torch.zeros((3, self.size[0], self.size[1]), dtype=torch.float32)
 
+    def __call__(self, image, depth, normal):
         # resize
         image = transforms.functional.resize(
             image, self.size, interpolation=Image.BILINEAR)
@@ -97,7 +92,17 @@ class HypersimImageDepthNormalTransform:
         depth = torch.from_numpy(depth).unsqueeze(0).unsqueeze(0)
         depth = F.interpolate(depth, size=self.size, mode='nearest').squeeze()
 
-        normal = self.to_tensor_and_resize_normal(normal)
+        if normal is not None:
+            # convert the inward normals to outward normals
+            normal[:, :, 0] *= -1
+            if self.align_cam_normal:
+                # align normal towards camera
+                H, W = normal.shape[:2]
+                normal = align_normals(
+                    normal, depth, [886.81, 886.81, W/2, H/2], H, W)
+            normal = self.to_tensor_and_resize_normal(normal)
+        else:
+            normal = self.empty_normal()
 
         # random flip
         if self.random_flip and random.random() > 0.5:
@@ -217,9 +222,10 @@ class HypersimDataset(Dataset):
                 self.new_h, self.new_w), mode='nearest').squeeze()
             raw_depth = torch.clamp(raw_depth, 1e-3, 65).repeat(3, 1, 1)
 
-            # load normals
-            with h5py.File(nor_path, 'r') as f:
-                normal = np.array(f["dataset"])
+            normal = None
+            if os.path.exists(nor_path):
+                with h5py.File(nor_path, 'r') as f:
+                    normal = np.array(f["dataset"])
 
             image, depth, normal = self.transform(image, depth, normal)
             if torch.isnan(image).any() or torch.isinf(image).any():
