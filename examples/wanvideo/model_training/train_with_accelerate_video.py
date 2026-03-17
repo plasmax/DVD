@@ -489,16 +489,16 @@ if __name__ == "__main__":
     accelerator.print(
         f"Enlarged length of ttr and vkitti: {len(ttr_vid_train_dataset)}, {len(vikitt_vid_train_dataset)}")
 
-    # ttr_vid_train_dataloader = torch.utils.data.DataLoader(
-    #     ttr_vid_train_dataset,
-    #     shuffle=True,
-    #     batch_size=1,
-    #     num_workers=2,
-    #     collate_fn=custom_collate_fn,
-    #     pin_memory=True,
-    #     persistent_workers=True,
-    #     drop_last=True,
-    # )
+    ttr_vid_train_dataloader = torch.utils.data.DataLoader(
+        ttr_vid_train_dataset,
+        shuffle=True,
+        batch_size=1,
+        num_workers=2,
+        collate_fn=custom_collate_fn,
+        pin_memory=True,
+        persistent_workers=True,
+        drop_last=True,
+    )
 
     vkitti_vid_train_dataloader = torch.utils.data.DataLoader(
         vikitt_vid_train_dataset,
@@ -510,8 +510,6 @@ if __name__ == "__main__":
         persistent_workers=True,
         drop_last=True,
     )
-    ttr_vid_train_dataloader = vkitti_vid_train_dataloader  # Hack to bypass empty dataset
-
     # Test set
     # kitti_vid_test_dataset = KITTI_VID_Dataset(
     #     data_root=args.kitti_vid_test_data_root,

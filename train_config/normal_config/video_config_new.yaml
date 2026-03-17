@@ -48,7 +48,7 @@ dataloader_num_workers: 4
 train_ratio: 1
 
 # 2 : 6 
-prob: [0, 1, 0, 1]
+prob: [0, 1, 1, 1]
 batch_size: 4
 
 # Image
@@ -69,7 +69,7 @@ min_num_frame: 5
 max_sample_stride: 1
 min_sample_stride: 1
 
-train_data_dir_ttr_vid: "your_tttr_dir"
+train_data_dir_ttr_vid: "../datasets/tartanair"
 train_data_dir_vkitti_vid: '../datasets/vkitti_2.0.3'
 
 # test_set
