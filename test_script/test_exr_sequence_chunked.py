@@ -101,6 +101,49 @@ def get_window_index(T, window_size, overlap):
     return res
 
 
+def get_trimmed_window_plan(T, window_size, overlap, trim_frames):
+    """Plans fixed-length inference windows with warmup trimmed from later windows."""
+    if trim_frames == 0:
+        inference_windows = get_window_index(T, window_size, overlap)
+        output_windows = inference_windows.copy()
+        return inference_windows, output_windows
+
+    usable_frames = window_size - trim_frames
+    stride = usable_frames - overlap
+    if usable_frames <= 0:
+        raise ValueError(
+            f"trim_frames must be smaller than window_size, got trim_frames={trim_frames}, "
+            f"window_size={window_size}"
+        )
+    if stride <= 0:
+        raise ValueError(
+            "overlap must be smaller than the usable frames after trimming, got "
+            f"overlap={overlap}, usable_frames={usable_frames}"
+        )
+
+    if T <= window_size:
+        return [(0, T)], [(0, T)]
+
+    inference_windows = [(0, window_size)]
+    output_windows = [(0, window_size)]
+
+    start = stride
+    while start < T:
+        end = start + window_size
+        if end < T:
+            inference_windows.append((start, end))
+            output_windows.append((start + trim_frames, end))
+            start += stride
+        else:
+            start = max(0, T - window_size)
+            if inference_windows[-1][0] != start:
+                inference_windows.append((start, T))
+                output_windows.append((start + trim_frames, T))
+            break
+
+    return inference_windows, output_windows
+
+
 def make_window_output_pattern(output_pattern, window_index):
     match = re.search(r"(%0?\d*d)", output_pattern)
     if match is None:
@@ -259,11 +302,15 @@ def load_model(ckpt_dir, yaml_args):
     return model
 
 
-def run_window_inference(model, sequence, windows, args):
-    for window_index, (start, end) in enumerate(windows):
+def run_window_inference(model, sequence, inference_windows, output_windows, args):
+    for window_index, ((start, end), (out_start, out_end)) in enumerate(
+        zip(inference_windows, output_windows)
+    ):
         window_frames = sequence[start:end]
+        output_frames = sequence[out_start:out_end]
         paths = [path for path, _ in window_frames]
         frame_numbers = [frame for _, frame in window_frames]
+        output_frame_numbers = [frame for _, frame in output_frames]
         output_pattern = make_window_output_pattern(args.output_sequence, window_index)
 
         print(
@@ -276,10 +323,12 @@ def run_window_inference(model, sequence, windows, args):
         print(f"Window input range: {input_tensor.min()} - {input_tensor.max()}")
 
         depth = infer_depth_window(model, input_tensor)
+        trimmed_start = 0 if window_index == 0 else min(args.trim_frames, len(frame_numbers))
+        depth = depth[trimmed_start:len(frame_numbers)]
         print(f"Window depth range: {depth.min()} - {depth.max()}, shape {depth.shape}")
         save_depth_sequence(
             depth,
-            frame_numbers,
+            output_frame_numbers,
             output_pattern,
             desc=f"Writing window {window_index:03d}",
         )
@@ -419,6 +468,12 @@ def parse_args():
     parser.add_argument("--height", type=int, default=480)
     parser.add_argument("--width", type=int, default=640)
     parser.add_argument("--overlap", type=int, default=9)
+    parser.add_argument(
+        "--trim_frames",
+        type=int,
+        default=16,
+        help="Warmup frames to discard from each inference window after the first.",
+    )
     parser.add_argument("--start", type=int)
     parser.add_argument("--end", type=int)
     return parser.parse_args()
@@ -426,21 +481,28 @@ def parse_args():
 
 def main():
     args = parse_args()
+    if args.trim_frames < 0:
+        raise ValueError(f"trim_frames must be non-negative, got {args.trim_frames}")
     if args.start is not None and args.end is not None and args.start > args.end:
         raise ValueError(f"Invalid frame range: start={args.start} is greater than end={args.end}")
 
     sequence = gather_exr_sequence(args.input_sequence)
     sequence = filter_frame_range(sequence, args.start, args.end)
-    windows = get_window_index(len(sequence), args.window_size, args.overlap)
-    print(f"Found {len(sequence)} frames across {len(windows)} windows: {windows}")
+    inference_windows, output_windows = get_trimmed_window_plan(
+        len(sequence), args.window_size, args.overlap, args.trim_frames
+    )
+    print(
+        f"Found {len(sequence)} frames across {len(inference_windows)} windows: "
+        f"inference={inference_windows}, output={output_windows}"
+    )
 
     yaml_args = OmegaConf.load(args.model_config)
     model = load_model(args.ckpt, yaml_args)
 
-    run_window_inference(model, sequence, windows, args)
+    run_window_inference(model, sequence, inference_windows, output_windows, args)
     unload_model(model)
 
-    align_windowed_depth(sequence, windows, args)
+    align_windowed_depth(sequence, output_windows, args)
     print("Chunked inference completed successfully!")
 
 

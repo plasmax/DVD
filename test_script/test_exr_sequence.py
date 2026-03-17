@@ -214,6 +214,49 @@ def get_window_index(T, window_size, overlap):
     return res
 
 
+def get_trimmed_window_plan(T, window_size, overlap, trim_frames):
+    """Plans fixed-length inference windows with warmup trimmed from later windows."""
+    if trim_frames == 0:
+        inference_windows = get_window_index(T, window_size, overlap)
+        output_windows = inference_windows.copy()
+        return inference_windows, output_windows
+
+    usable_frames = window_size - trim_frames
+    stride = usable_frames - overlap
+    if usable_frames <= 0:
+        raise ValueError(
+            f"trim_frames must be smaller than window_size, got trim_frames={trim_frames}, "
+            f"window_size={window_size}"
+        )
+    if stride <= 0:
+        raise ValueError(
+            "overlap must be smaller than the usable frames after trimming, got "
+            f"overlap={overlap}, usable_frames={usable_frames}"
+        )
+
+    if T <= window_size:
+        return [(0, T)], [(0, T)]
+
+    inference_windows = [(0, window_size)]
+    output_windows = [(0, window_size)]
+
+    start = stride
+    while start < T:
+        end = start + window_size
+        if end < T:
+            inference_windows.append((start, end))
+            output_windows.append((start + trim_frames, end))
+            start += stride
+        else:
+            start = max(0, T - window_size)
+            if inference_windows[-1][0] != start:
+                inference_windows.append((start, T))
+                output_windows.append((start + trim_frames, T))
+            break
+
+    return inference_windows, output_windows
+
+
 # =============================
 # Core Inference
 # =============================
@@ -226,21 +269,16 @@ def generate_depth_sliced(
     trim_frames=16,
 ):
     B, T, C, H, W = input_rgb.shape
-    depth_windows = get_window_index(T, window_size, overlap)
+    depth_windows, output_windows = get_trimmed_window_plan(
+        T, window_size, overlap, trim_frames
+    )
     print(f"depth_windows {depth_windows}")
+    print(f"output_windows {output_windows}")
 
     depth_res_list = []
 
-    for start, end in tqdm(depth_windows, desc="Inferencing Slices"):
-        actual_start = max(0, start - trim_frames)
-        prepended_context = start - actual_start
-        pad_start_count = trim_frames - prepended_context
-
-        input_rgb_slice = input_rgb[:, actual_start:end]
-        if pad_start_count > 0:
-            first_frame = input_rgb_slice[:, :1]
-            start_padding = first_frame.repeat(1, pad_start_count, 1, 1, 1)
-            input_rgb_slice = torch.cat([start_padding, input_rgb_slice], dim=1)
+    for window_idx, (start, end) in enumerate(tqdm(depth_windows, desc="Inferencing Slices")):
+        input_rgb_slice = input_rgb[:, start:end]
 
         input_rgb_slice, origin_T = pad_time_mod4(input_rgb_slice)
         input_frame = input_rgb_slice.shape[1]
@@ -264,13 +302,13 @@ def generate_depth_sliced(
             denoise_step=model.args.denoise_step,
         )
         depth = depth_to_single_channel(outputs["depth"])
-        trimmed_start = min(trim_frames, origin_T)
+        trimmed_start = 0 if window_idx == 0 else min(trim_frames, origin_T)
         depth_res_list.append(depth[:, trimmed_start:origin_T])
 
     depth_list_aligned = None
     prev_end = None
 
-    for i, (t, (start, end)) in enumerate(zip(depth_res_list, depth_windows)):
+    for i, (t, (start, end)) in enumerate(zip(depth_res_list, output_windows)):
         print(f"Handling window {i} start: {start}, end: {end}")
 
         if i == 0:
