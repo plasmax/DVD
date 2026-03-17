@@ -7,16 +7,21 @@ import time
 from datetime import timedelta
 from itertools import cycle
 
+import numpy as np
 import torch
+import torch.nn.functional as F
 from accelerate import Accelerator, accelerator
 from accelerate.utils import InitProcessGroupKwargs, set_seed
 from omegaconf import OmegaConf
+from PIL import Image
 from safetensors.torch import load_file
+from torch.utils.data import Dataset
 from tqdm import tqdm
 
 from examples.dataset import (HypersimDataset, KITTI_VID_Dataset, NYUv2Dataset,
                               Scannet_VID_Dataset, TartanAir_VID_Dataset,
                               VKITTI_VID_Dataset, VKITTIDataset)
+from examples.dataset.hypersim_dataset import HypersimImageDepthNormalTransform
 # Import modules
 from examples.wanvideo.model_training.DiffusionTrainingModule import \
     DiffusionTrainingModule
@@ -24,6 +29,13 @@ from examples.wanvideo.model_training.WanTrainingModule import (
     Validation, WanTrainingModule)
 
 from .training_loss import GradientLoss3DSeparate
+
+try:
+    import Imath
+    import OpenEXR
+except ImportError:
+    Imath = None
+    OpenEXR = None
 
 process_group_kwargs = InitProcessGroupKwargs(timeout=timedelta(minutes=30))
 
@@ -33,6 +45,154 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 _interrupt_requested = False
 _interrupt_count = 0
+
+
+def load_synthhuman_depth_exr(depth_path):
+    if OpenEXR is None or Imath is None:
+        raise ImportError(
+            "SynthHumanDataset requires the OpenEXR Python package "
+            "(imports `OpenEXR` and `Imath`)."
+        )
+
+    exr_file = OpenEXR.InputFile(depth_path)
+    try:
+        header = exr_file.header()
+        data_window = header["dataWindow"]
+        width = data_window.max.x - data_window.min.x + 1
+        height = data_window.max.y - data_window.min.y + 1
+        channel_map = header["channels"]
+        channel_names = list(channel_map.keys())
+        preferred = ("Z", "Y", "R", "G", "B")
+        channel_name = next(
+            (name for name in preferred if name in channel_names),
+            sorted(channel_names)[0],
+        )
+        pixel_type = Imath.PixelType(Imath.PixelType.FLOAT)
+        raw = exr_file.channel(channel_name, pixel_type)
+        depth = np.frombuffer(raw, dtype=np.float32).reshape(height, width)
+        return depth
+    finally:
+        exr_file.close()
+
+
+class SynthHumanDataset(Dataset):
+    def __init__(
+        self,
+        data_dir,
+        random_flip,
+        norm_type,
+        resolution=(480, 640),
+        truncnorm_min=0.02,
+        start=0,
+        train_ratio=1.0,
+    ):
+        self.data_dir = data_dir
+        self.data_list = []
+        self.invalid_indices = set()
+        self.reported_invalid_indices = set()
+
+        if OpenEXR is None or Imath is None:
+            raise ImportError(
+                "SynthHumanDataset requires the OpenEXR Python package "
+                "(imports `OpenEXR` and `Imath`)."
+            )
+
+        for root, _, files in os.walk(data_dir):
+            for filename in files:
+                if not filename.startswith("rgb_") or not filename.endswith(".png"):
+                    continue
+                rgb_path = os.path.join(root, filename)
+                depth_name = filename.replace("rgb_", "depth_", 1).rsplit(".", 1)[0] + ".exr"
+                depth_path = os.path.join(root, depth_name)
+                if os.path.exists(depth_path):
+                    self.data_list.append((rgb_path, depth_path))
+
+        self.data_list.sort()
+        self.data_list = self.data_list[start:]
+        if not self.data_list:
+            raise RuntimeError(
+                f"No SynthHuman RGB/depth pairs found under {data_dir}"
+            )
+
+        new_h, new_w = resolution
+        self.new_h = new_h
+        self.new_w = new_w
+        self.transform = HypersimImageDepthNormalTransform(
+            (new_h, new_w), random_flip, norm_type, truncnorm_min, False
+        )
+
+        if train_ratio < 1.0:
+            origin_len = len(self.data_list)
+            self.data_list = self.data_list[:int(origin_len * train_ratio)]
+            print(
+                f"SynthHuman use {int(origin_len * train_ratio)} samples instead of {origin_len}..."
+            )
+        else:
+            print(f"SynthHuman use origin {len(self.data_list)} samples...")
+
+    def __len__(self):
+        return len(self.data_list)
+
+    def _report_invalid_sample(self, idx, reason, img_path, dep_path):
+        if idx in self.reported_invalid_indices:
+            return
+        self.reported_invalid_indices.add(idx)
+        print(
+            f"Skipping invalid SynthHuman sample at index {idx}: {reason}. "
+            f"image={img_path}, depth={dep_path}"
+        )
+
+    def _next_valid_index(self, idx):
+        if len(self.invalid_indices) >= len(self.data_list):
+            raise RuntimeError("All SynthHuman samples are invalid.")
+        next_idx = (idx + 1) % len(self.data_list)
+        while next_idx in self.invalid_indices:
+            next_idx = (next_idx + 1) % len(self.data_list)
+        return next_idx
+
+    def __getitem__(self, idx):
+        idx = idx % len(self.data_list)
+        if idx in self.invalid_indices:
+            return self.__getitem__(self._next_valid_index(idx))
+
+        try:
+            img_path, dep_path = self.data_list[idx]
+            image = Image.open(img_path).convert("RGB")
+
+            # SynthHuman depth is published in centimeters; convert to meters.
+            depth = load_synthhuman_depth_exr(dep_path) / 100.0
+            if not np.isfinite(depth).all():
+                raise ValueError("depth contains NaN or inf")
+            if (depth <= 0).any():
+                raise ValueError("depth contains non-positive values")
+
+            raw_depth = torch.from_numpy(depth).unsqueeze(0).unsqueeze(0)
+            raw_depth = F.interpolate(
+                raw_depth, size=(self.new_h, self.new_w), mode="nearest"
+            ).squeeze()
+            raw_depth = torch.clamp(raw_depth, 1e-3, 65).repeat(3, 1, 1)
+
+            image, depth, normal = self.transform(image, depth, None)
+            if torch.isnan(image).any() or torch.isinf(image).any():
+                raise ValueError("image is nan or inf after transform")
+            if torch.isnan(depth).any() or torch.isinf(depth).any():
+                raise ValueError("depth is nan or inf after transform")
+
+            return {
+                "sample_idx": torch.tensor(idx),
+                "images": image.unsqueeze(0),
+                "disparity": depth.unsqueeze(0),
+                "depth": raw_depth.unsqueeze(0),
+                "normal_values": normal,
+                "image_path": img_path,
+                "depth_path": dep_path,
+            }
+        except Exception as exc:
+            img_path = self.data_list[idx][0] if self.data_list else "unknown"
+            dep_path = self.data_list[idx][1] if self.data_list else "unknown"
+            self.invalid_indices.add(idx)
+            self._report_invalid_sample(idx, str(exc), img_path, dep_path)
+            return self.__getitem__(self._next_valid_index(idx))
 
 
 def _sigint_handler(signum, frame):
@@ -438,8 +598,27 @@ if __name__ == "__main__":
         train_ratio=args.train_ratio,
 
     )
+    synthhuman_train_dataset = SynthHumanDataset(
+        data_dir=args.train_data_dir_synthhuman,
+        resolution=args.resolution_hypersim,
+        random_flip=args.random_flip,
+        norm_type=args.norm_type,
+        truncnorm_min=args.truncnorm_min,
+        train_ratio=args.train_ratio,
+    )
     hypersim_train_dataloader = torch.utils.data.DataLoader(
         hypersim_train_dataset,
+        shuffle=True,
+        batch_size=args.batch_size,
+        num_workers=2,
+        collate_fn=custom_collate_fn,
+        pin_memory=True,
+        prefetch_factor=4,
+        persistent_workers=True,
+        drop_last=True,
+    )
+    synthhuman_train_dataloader = torch.utils.data.DataLoader(
+        synthhuman_train_dataset,
         shuffle=True,
         batch_size=args.batch_size,
         num_workers=2,
@@ -563,9 +742,9 @@ if __name__ == "__main__":
     nyuv2_test_dataloader = []
 
     start_epoch, global_step = 0, 0
-    model, optimizer, scheduler, hypersim_train_dataloader, vkitti_train_dataloader, ttr_vid_train_dataloader, vkitti_vid_train_dataloader, kitti_vid_test_dataloader, scannet_vid_test_dataloader, nyuv2_test_dataloader = (
+    model, optimizer, scheduler, hypersim_train_dataloader, synthhuman_train_dataloader, vkitti_train_dataloader, ttr_vid_train_dataloader, vkitti_vid_train_dataloader, kitti_vid_test_dataloader, scannet_vid_test_dataloader, nyuv2_test_dataloader = (
         accelerator.prepare(
-            model, optimizer, scheduler, hypersim_train_dataloader, vkitti_train_dataloader, ttr_vid_train_dataloader, vkitti_vid_train_dataloader, kitti_vid_test_dataloader, scannet_vid_test_dataloader, nyuv2_test_dataloader
+            model, optimizer, scheduler, hypersim_train_dataloader, synthhuman_train_dataloader, vkitti_train_dataloader, ttr_vid_train_dataloader, vkitti_vid_train_dataloader, kitti_vid_test_dataloader, scannet_vid_test_dataloader, nyuv2_test_dataloader
         )
     )
 
@@ -610,9 +789,9 @@ if __name__ == "__main__":
         accelerator.print("Training state loaded.")
         accelerator.wait_for_everyone()
 
-    # Hard code to the order of 'hypersim', 'vikitti', ttr', 'vkitti'
-    dataloader_list = [hypersim_train_dataloader, vkitti_train_dataloader,
-                       ttr_vid_train_dataloader, vkitti_vid_train_dataloader]
+    # Hard code to the order of 'hypersim', 'synthhuman', 'vikitti', 'ttr', 'vkitti'
+    dataloader_list = [hypersim_train_dataloader, synthhuman_train_dataloader,
+                       vkitti_train_dataloader, ttr_vid_train_dataloader, vkitti_vid_train_dataloader]
 
     if hasattr(model, 'module'):
         model = model.module
