@@ -8,6 +8,7 @@ models/
 .uvcache/
 *__pycache__/*
 *.pyc
+*.log
 video/
 models
 *.safetensors
