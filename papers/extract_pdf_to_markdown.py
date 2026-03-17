@@ -51,6 +51,8 @@ def is_noise_line(line: str) -> bool:
         return False
     if re.fullmatch(r"\d+", stripped):
         return True
+    if re.fullmatch(r"\d+\.\d+", stripped):
+        return True
     if stripped.startswith("arXiv:"):
         return True
     if stripped in {"†", "‡"}:
@@ -189,7 +191,67 @@ def is_global_label_noise(block: str) -> bool:
         return True
     if re.fullmatch(r"w/[A-Za-z. ]+|w/o[A-Za-z. ]+", stripped):
         return True
+    if stripped.count("τ") + stripped.count("𝜏") >= 2:
+        return True
     return False
+
+
+def looks_like_inline_subhead(block: str) -> bool:
+    stripped = block.strip()
+    if len(stripped) < 6 or len(stripped) > 80:
+        return False
+    if not stripped.endswith("."):
+        return False
+    if stripped.startswith(("Figure ", "Table ")):
+        return False
+    if looks_like_heading(stripped[:-1]):
+        return False
+    return bool(re.fullmatch(r"[A-Z][A-Za-z0-9\- ]+\.", stripped))
+
+
+def looks_like_plain_subhead(block: str) -> bool:
+    stripped = block.strip()
+    if len(stripped) < 6 or len(stripped) > 80:
+        return False
+    if stripped.endswith("."):
+        return False
+    if stripped.startswith(("Figure ", "Table ")):
+        return False
+    if looks_like_heading(stripped):
+        return False
+    if re.search(r"[=<>↑↓∼]", stripped):
+        return False
+    return bool(re.fullmatch(r"[A-Z][A-Za-z0-9\- ]+", stripped))
+
+
+def looks_like_table_row(block: str) -> bool:
+    stripped = block.strip()
+    if not stripped:
+        return False
+    if looks_like_heading(stripped) or stripped.startswith(("Figure ", "Table ")):
+        return False
+    if "↑" in stripped or "↓" in stripped:
+        return True
+    if len(re.findall(r"\d", stripped)) >= 4:
+        return True
+    if re.search(r"\b(?:AbsRel|Recall|Paradigm|Method|KITTI|ScanNet|Bonn|Sintel|NYUv2|DIODE)\b", stripped):
+        return True
+    return False
+
+
+def looks_like_prose(block: str) -> bool:
+    stripped = block.strip()
+    if not stripped:
+        return False
+    if looks_like_heading(stripped) or looks_like_inline_subhead(stripped) or looks_like_plain_subhead(stripped):
+        return False
+    if stripped.startswith(("Figure ", "Table ")):
+        return False
+    if len(re.findall(r"[A-Za-z]", stripped)) < 20:
+        return False
+    if len(re.findall(r"\d", stripped)) > 8 and "Figure" not in stripped:
+        return False
+    return "." in stripped or ":" in stripped
 
 
 def cleanup_blocks(blocks: list[str], title: str) -> list[str]:
@@ -224,13 +286,66 @@ def cleanup_blocks(blocks: list[str], title: str) -> list[str]:
 
 def blocks_to_markdown(blocks: list[str]) -> str:
     output: list[str] = []
-    for block in blocks:
+    last_heading: str | None = None
+    i = 0
+    while i < len(blocks):
+        block = blocks[i]
         if looks_like_heading(block):
-            output.append(f"## {block}")
+            heading = f"## {block}"
+            if heading != last_heading:
+                output.append(heading)
+                output.append("")
+                last_heading = heading
+            i += 1
+            continue
+        if looks_like_inline_subhead(block):
+            heading = f"### {block[:-1]}"
+            if heading != last_heading:
+                output.append(heading)
+                output.append("")
+                last_heading = heading
+            i += 1
+            continue
+        if looks_like_plain_subhead(block):
+            heading = f"### {block}"
+            if heading != last_heading:
+                output.append(heading)
+                output.append("")
+                last_heading = heading
+            i += 1
+            continue
+        if block.startswith("Figure "):
+            caption = " ".join(
+                part.strip()
+                for part in [block, blocks[i + 1] if i + 1 < len(blocks) and not blocks[i + 1].startswith(("Figure ", "Table ")) and not looks_like_heading(blocks[i + 1]) and len(blocks[i + 1]) < 220 else ""]
+                if part.strip()
+            )
+            output.append(f"> {caption}")
             output.append("")
+            last_heading = None
+            if caption != block:
+                i += 1
+            i += 1
+            continue
+        if block.startswith("Table "):
+            output.append(f"> {block}")
+            output.append("")
+            j = i + 1
+            while j < len(blocks):
+                if looks_like_heading(blocks[j]) or looks_like_inline_subhead(blocks[j]) or looks_like_plain_subhead(blocks[j]):
+                    break
+                if blocks[j].startswith(("Figure ", "Table ")):
+                    break
+                if looks_like_prose(blocks[j]):
+                    break
+                j += 1
+            last_heading = None
+            i = j
             continue
         output.append(block)
         output.append("")
+        last_heading = None
+        i += 1
     return "\n".join(output).strip()
 
 
