@@ -176,6 +176,8 @@ class HypersimDataset(Dataset):
                     self.data_list.append((img, dep, nor))
         self.data_list.sort()
         self.data_list = self.data_list[start:]
+        self.invalid_indices = set()
+        self.reported_invalid_indices = set()
         # print(
         #     f"Total {len(self.data_list)} samples found for {split} set, first ten samples: {self.data_list[:10]}")
         # # compute new resolution
@@ -205,8 +207,27 @@ class HypersimDataset(Dataset):
     def __len__(self):
         return len(self.data_list)
 
+    def _report_invalid_sample(self, idx, reason, img_path, dep_path):
+        if idx in self.reported_invalid_indices:
+            return
+        self.reported_invalid_indices.add(idx)
+        print(
+            f"Skipping invalid Hypersim sample at index {idx}: {reason}. "
+            f"image={img_path}, depth={dep_path}"
+        )
+
+    def _next_valid_index(self, idx):
+        if len(self.invalid_indices) >= len(self.data_list):
+            raise RuntimeError("All Hypersim samples are invalid.")
+        next_idx = (idx + 1) % len(self.data_list)
+        while next_idx in self.invalid_indices:
+            next_idx = (next_idx + 1) % len(self.data_list)
+        return next_idx
+
     def __getitem__(self, idx):
         idx = idx % len(self.data_list)
+        if idx in self.invalid_indices:
+            return self.__getitem__(self._next_valid_index(idx))
         try:
             img_path, dep_path, nor_path = self.data_list[idx]
 
@@ -215,8 +236,14 @@ class HypersimDataset(Dataset):
             # load depth (distance → depth)
             with h5py.File(dep_path, 'r') as f:
                 dist = np.array(f["dataset"])
+            if not np.isfinite(dist).all():
+                raise ValueError("distance contains NaN or inf")
 
             depth = hypersim_distance_to_depth(dist)
+            if not np.isfinite(depth).all():
+                raise ValueError("depth contains NaN or inf after conversion")
+            if (depth <= 0).any():
+                raise ValueError("depth contains non-positive values")
             raw_depth = torch.from_numpy(depth).unsqueeze(0).unsqueeze(0)
             raw_depth = F.interpolate(raw_depth, size=(
                 self.new_h, self.new_w), mode='nearest').squeeze()
@@ -229,13 +256,9 @@ class HypersimDataset(Dataset):
 
             image, depth, normal = self.transform(image, depth, normal)
             if torch.isnan(image).any() or torch.isinf(image).any():
-                print(
-                    f"Error loading data at index {idx}: image is nan or inf")
-                return self.__getitem__(idx+1)
+                raise ValueError("image is nan or inf after transform")
             if torch.isnan(depth).any() or torch.isinf(depth).any():
-                print(
-                    f"Error loading data at index {idx}: depth is nan or inf")
-                return self.__getitem__(idx+1)
+                raise ValueError("depth is nan or inf after transform")
             return {
                 "sample_idx": torch.tensor(idx),
                 "images": image.unsqueeze(0),
@@ -247,9 +270,11 @@ class HypersimDataset(Dataset):
                 "normal_path": nor_path,
             }
         except Exception as e:
-            print(f"Error loading data at index {idx}: {e}")
-            # In case of error, return a random sample
-            return self.__getitem__(idx+1)
+            img_path = self.data_list[idx][0] if self.data_list else "unknown"
+            dep_path = self.data_list[idx][1] if self.data_list else "unknown"
+            self.invalid_indices.add(idx)
+            self._report_invalid_sample(idx, str(e), img_path, dep_path)
+            return self.__getitem__(self._next_valid_index(idx))
 
 
 def collate_fn_hypersim(batch):
