@@ -2,6 +2,8 @@ import argparse
 import gc
 import os
 import random
+import signal
+import time
 from datetime import timedelta
 from itertools import cycle
 
@@ -27,6 +29,89 @@ process_group_kwargs = InitProcessGroupKwargs(timeout=timedelta(minutes=30))
 
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
+
+_interrupt_requested = False
+_interrupt_count = 0
+
+
+def _sigint_handler(signum, frame):
+    del signum, frame
+    global _interrupt_requested, _interrupt_count
+    _interrupt_count += 1
+    if _interrupt_count >= 2:
+        raise KeyboardInterrupt
+    _interrupt_requested = True
+    print(
+        "\nSIGINT received. Training will pause at the next safe point."
+        " Press Ctrl+C again to exit immediately.",
+        flush=True,
+    )
+
+
+def maybe_save_and_exit_on_interrupt(accelerator, model, model_logger, global_step, args):
+    global _interrupt_requested
+    if not _interrupt_requested:
+        return False, global_step
+
+    decision_path = os.path.join(model_logger.output_path, ".sigint_decision")
+
+    if accelerator.is_main_process:
+        while True:
+            answer = input(
+                f"\nCtrl+C received at global step {global_step}. "
+                "Save checkpoint before exiting? [y/N]: "
+            ).strip().lower()
+            if answer in ("", "n", "no"):
+                decision = "exit"
+                break
+            if answer in ("y", "yes"):
+                decision = "save"
+                break
+            print("Please answer 'y' or 'n'.", flush=True)
+        with open(decision_path, "w") as f:
+            f.write(decision)
+
+    while not os.path.exists(decision_path):
+        time.sleep(0.1)
+
+    with open(decision_path, "r") as f:
+        decision = f.read().strip()
+
+    accelerator.wait_for_everyone()
+
+    if decision == "save":
+        model.pipe.dit.eval()
+        print(f"GPU {accelerator.process_index} saving training state before exit...")
+        accelerator.save_state(
+            os.path.join(model_logger.output_path, f"checkpoint-step-{global_step}")
+        )
+        if accelerator.is_main_process:
+            torch.save(
+                {"global_step": global_step},
+                os.path.join(model_logger.output_path, "trainer_state.pt"),
+            )
+            print(f"Checkpoint saved at step {global_step}", flush=True)
+    else:
+        print(
+            f"GPU {accelerator.process_index} exiting without saving at step {global_step}",
+            flush=True,
+        )
+
+    accelerator.wait_for_everyone()
+
+    if accelerator.is_main_process and os.path.exists(decision_path):
+        os.remove(decision_path)
+
+    if decision == "save":
+        model.pipe.scheduler.set_timesteps(
+            training=True,
+            denoise_step=args.denoise_step,
+        )
+        model.pipe.dit.train()
+
+    _interrupt_requested = False
+    return True, global_step
 
 
 def custom_collate_fn(batch):
@@ -258,6 +343,17 @@ def launch_training_task(
                         model.pipe.dit.train()
                     accelerator.wait_for_everyone()
 
+            should_exit, global_step = maybe_save_and_exit_on_interrupt(
+                accelerator=accelerator,
+                model=model,
+                model_logger=model_logger,
+                global_step=global_step,
+                args=args,
+            )
+            if should_exit:
+                accelerator.end_training()
+                return
+
         accelerator.end_training()
 
 
@@ -279,6 +375,7 @@ if __name__ == "__main__":
         mixed_precision=args.mixed_precision,
         kwargs_handlers=[process_group_kwargs],
     )
+    signal.signal(signal.SIGINT, _sigint_handler)
     accelerator.print(OmegaConf.to_yaml(cfg))
 
     # set_seed(42)
@@ -288,6 +385,9 @@ if __name__ == "__main__":
     args_save_path = os.path.join(args.output_path, "args.yaml")
 
     if accelerator.is_main_process:
+        sigint_decision_path = os.path.join(args.output_path, ".sigint_decision")
+        if os.path.exists(sigint_decision_path):
+            os.remove(sigint_decision_path)
         accelerator.print(f"Saving args to {args_save_path}")
         with open(args_save_path, "w") as f:
             f.write(OmegaConf.to_yaml(args))
