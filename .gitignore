@@ -24,6 +24,7 @@ ckpt/DVD/
 outputs/
 inference_results/
 *.mp4
+*.pdf
 ckpt/DVD
 .msc
 .mv
