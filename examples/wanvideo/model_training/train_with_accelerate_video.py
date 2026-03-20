@@ -672,9 +672,11 @@ def launch_training_task(
 
                         accumulate_grad_loss = accumulate_grad_loss - accumulate_depth_loss
 
-                        print(
-                            f"GPU {rank} step {global_step}: depth loss = {accumulate_depth_loss}, grad_loss = {accumulate_grad_loss}, learning rate : {scheduler.get_last_lr()[0]:.8f}"
+                        tqdm.write(
+                            f"GPU {rank} step {global_step}: depth loss = {accumulate_depth_loss:.6f}, grad_loss = {accumulate_grad_loss:.6f}, learning rate : {scheduler.get_last_lr()[0]:.8f}",
+                            file=sys.stdout,
                         )
+                        sys.stdout.flush()
                         accumulate_depth_loss = 0.0
                         accumulate_grad_loss = 0.0
                         acm_cnt = 0
