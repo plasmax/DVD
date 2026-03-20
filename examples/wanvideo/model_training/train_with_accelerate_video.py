@@ -50,6 +50,34 @@ _interrupt_count = 0
 _last_known_global_step = 0
 
 
+class _TeeStream:
+    """Write to both a terminal stream and a log file."""
+
+    def __init__(self, original, log_file):
+        self._original = original
+        self._log_file = log_file
+
+    def write(self, data):
+        self._original.write(data)
+        try:
+            self._log_file.write(data)
+        except Exception:
+            pass
+
+    def flush(self):
+        self._original.flush()
+        try:
+            self._log_file.flush()
+        except Exception:
+            pass
+
+    def isatty(self):
+        return self._original.isatty()
+
+    def fileno(self):
+        return self._original.fileno()
+
+
 def load_synthhuman_depth_exr(depth_path):
     if OpenEXR is None or Imath is None:
         raise ImportError(
@@ -323,12 +351,6 @@ def _sigint_handler(signum, frame):
     del frame
     global _interrupt_requested, _interrupt_count
     _interrupt_count += 1
-    # Write to a file first — this works even if all pipes are broken.
-    try:
-        with open("/tmp/_sigint_debug.log", "a") as f:
-            f.write(f"handler fired: signal={signum}, count={_interrupt_count}\n")
-    except Exception:
-        pass
     if _interrupt_count >= 2:
         raise KeyboardInterrupt
     _interrupt_requested = True
@@ -603,9 +625,6 @@ def launch_training_task(
     # Re-register signal handlers in case accelerate/torch overrode them.
     signal.signal(signal.SIGINT, _sigint_handler)
     signal.signal(signal.SIGTERM, _sigint_handler)
-    _h = signal.getsignal(signal.SIGINT)
-    print(f"{rank} SIGINT handler before loop: {_h} (ours={_h is _sigint_handler})",
-          file=sys.stderr, flush=True)
 
     print(f"{rank} Entering training loop...")
     _last_known_global_step = global_step
@@ -618,15 +637,6 @@ def launch_training_task(
         )
         progress_bar.set_postfix(global_step=global_step)
         for small_batch_step in progress_bar:
-            # DEBUG: verify handler is still ours every 10 steps
-            if small_batch_step % 10 == 0:
-                _h = signal.getsignal(signal.SIGINT)
-                if _h is not _sigint_handler:
-                    print(f"[WARNING] SIGINT handler overridden at step {small_batch_step}! "
-                          f"Now: {_h}", file=sys.stderr, flush=True)
-                    signal.signal(signal.SIGINT, _sigint_handler)
-                    signal.signal(signal.SIGTERM, _sigint_handler)
-
             select_pos = random.choices(
                 population=range(len(train_dataloader_list)),
                 weights=prob,
@@ -783,6 +793,18 @@ if __name__ == "__main__":
 
     # Save args
     os.makedirs(args.output_path, exist_ok=True)
+
+    # Tee stdout/stderr to a log file so we don't need shell pipes.
+    if accelerator.is_main_process:
+        _log_path = os.path.join(
+            args.output_path,
+            f"train_{time.strftime('%Y-%m-%d_%H-%M-%S')}.log",
+        )
+        _log_file = open(_log_path, "a")
+        sys.stdout = _TeeStream(sys.__stdout__, _log_file)
+        sys.stderr = _TeeStream(sys.__stderr__, _log_file)
+        print(f"Logging to {_log_path}", flush=True)
+
     args_save_path = os.path.join(args.output_path, "args.yaml")
 
     if accelerator.is_main_process:
