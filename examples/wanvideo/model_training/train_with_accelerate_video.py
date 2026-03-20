@@ -6,6 +6,7 @@ import signal
 import time
 from datetime import timedelta
 from itertools import cycle
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -73,6 +74,17 @@ def load_synthhuman_depth_exr(depth_path):
         return depth
     finally:
         exr_file.close()
+
+
+def sanitize_infinigen_depth(depth):
+    finite_positive = np.isfinite(depth) & (depth > 0)
+    if not finite_positive.any():
+        raise ValueError("depth has no finite positive values")
+    sanitized = depth.astype(np.float32, copy=True)
+    # Infinigen commonly uses inf background; replace it with the farthest
+    # finite depth so the existing normalization path can run without masks.
+    sanitized[~finite_positive] = np.max(sanitized[finite_positive])
+    return sanitized
 
 
 class SynthHumanDataset(Dataset):
@@ -165,6 +177,116 @@ class SynthHumanDataset(Dataset):
                 raise ValueError("depth contains NaN or inf")
             if (depth <= 0).any():
                 raise ValueError("depth contains non-positive values")
+
+            raw_depth = torch.from_numpy(depth).unsqueeze(0).unsqueeze(0)
+            raw_depth = F.interpolate(
+                raw_depth, size=(self.new_h, self.new_w), mode="nearest"
+            ).squeeze()
+            raw_depth = torch.clamp(raw_depth, 1e-3, 65).repeat(3, 1, 1)
+
+            image, depth, normal = self.transform(image, depth, None)
+            if torch.isnan(image).any() or torch.isinf(image).any():
+                raise ValueError("image is nan or inf after transform")
+            if torch.isnan(depth).any() or torch.isinf(depth).any():
+                raise ValueError("depth is nan or inf after transform")
+
+            return {
+                "sample_idx": torch.tensor(idx),
+                "images": image.unsqueeze(0),
+                "disparity": depth.unsqueeze(0),
+                "depth": raw_depth.unsqueeze(0),
+                "normal_values": normal,
+                "image_path": img_path,
+                "depth_path": dep_path,
+            }
+        except Exception as exc:
+            img_path = self.data_list[idx][0] if self.data_list else "unknown"
+            dep_path = self.data_list[idx][1] if self.data_list else "unknown"
+            self.invalid_indices.add(idx)
+            self._report_invalid_sample(idx, str(exc), img_path, dep_path)
+            return self.__getitem__(self._next_valid_index(idx))
+
+
+class InfinigenDataset(Dataset):
+    def __init__(
+        self,
+        data_dir,
+        random_flip,
+        norm_type,
+        resolution=(480, 640),
+        truncnorm_min=0.02,
+        start=0,
+        train_ratio=1.0,
+    ):
+        self.data_dir = data_dir
+        self.data_list = []
+        self.invalid_indices = set()
+        self.reported_invalid_indices = set()
+
+        for image_path in sorted(Path(data_dir).rglob("Image*.png")):
+            depth_name = image_path.name.replace("Image", "Depth", 1).rsplit(".", 1)[0] + ".npy"
+            if "/Image/" in str(image_path):
+                depth_path = Path(str(image_path).replace("/Image/", "/Depth/")).with_name(depth_name)
+            else:
+                depth_path = image_path.with_name(depth_name)
+            if depth_path.exists():
+                self.data_list.append((str(image_path), str(depth_path)))
+
+        self.data_list = self.data_list[start:]
+        if not self.data_list:
+            raise RuntimeError(
+                f"No Infinigen RGB/depth pairs found under {data_dir}"
+            )
+
+        new_h, new_w = resolution
+        self.new_h = new_h
+        self.new_w = new_w
+        self.transform = HypersimImageDepthNormalTransform(
+            (new_h, new_w), random_flip, norm_type, truncnorm_min, False
+        )
+
+        if train_ratio < 1.0:
+            origin_len = len(self.data_list)
+            self.data_list = self.data_list[:int(origin_len * train_ratio)]
+            print(
+                f"Infinigen use {int(origin_len * train_ratio)} samples instead of {origin_len}..."
+            )
+        else:
+            print(f"Infinigen use origin {len(self.data_list)} samples...")
+
+    def __len__(self):
+        return len(self.data_list)
+
+    def _report_invalid_sample(self, idx, reason, img_path, dep_path):
+        if idx in self.reported_invalid_indices:
+            return
+        self.reported_invalid_indices.add(idx)
+        print(
+            f"Skipping invalid Infinigen sample at index {idx}: {reason}. "
+            f"image={img_path}, depth={dep_path}"
+        )
+
+    def _next_valid_index(self, idx):
+        if len(self.invalid_indices) >= len(self.data_list):
+            raise RuntimeError("All Infinigen samples are invalid.")
+        next_idx = (idx + 1) % len(self.data_list)
+        while next_idx in self.invalid_indices:
+            next_idx = (next_idx + 1) % len(self.data_list)
+        return next_idx
+
+    def __getitem__(self, idx):
+        idx = idx % len(self.data_list)
+        if idx in self.invalid_indices:
+            return self.__getitem__(self._next_valid_index(idx))
+
+        try:
+            img_path, dep_path = self.data_list[idx]
+            image = Image.open(img_path).convert("RGB")
+
+            depth = np.load(dep_path)
+            if depth.ndim != 2:
+                raise ValueError(f"expected HxW depth, got shape {depth.shape}")
+            depth = sanitize_infinigen_depth(depth)
 
             raw_depth = torch.from_numpy(depth).unsqueeze(0).unsqueeze(0)
             raw_depth = F.interpolate(
@@ -290,6 +412,55 @@ def custom_collate_fn(batch):
     return collated
 
 
+def _build_tartanair_video_dataloader(args, accelerator):
+    dataset = TartanAir_VID_Dataset(
+        data_dir=args.train_data_dir_ttr_vid,
+        random_flip=args.random_flip,
+        norm_type=args.norm_type,
+        max_num_frame=args.max_num_frame,
+        min_num_frame=args.min_num_frame,
+        max_sample_stride=args.max_sample_stride,
+        min_sample_stride=args.min_sample_stride,
+        train_ratio=args.train_ratio,
+    )
+    dataset.data_list = dataset.data_list * 100
+    accelerator.print(f"Enlarged length of tartanair_video: {len(dataset)}")
+    return torch.utils.data.DataLoader(
+        dataset,
+        shuffle=True,
+        batch_size=1,
+        num_workers=2,
+        collate_fn=custom_collate_fn,
+        pin_memory=True,
+        persistent_workers=True,
+        drop_last=True,
+    )
+
+
+def _build_vkitti_video_dataloader(args, accelerator):
+    dataset = VKITTI_VID_Dataset(
+        root_dir=args.train_data_dir_vkitti_vid,
+        norm_type=args.norm_type,
+        max_num_frame=args.max_num_frame,
+        min_num_frame=args.min_num_frame,
+        max_sample_stride=args.max_sample_stride,
+        min_sample_stride=args.min_sample_stride,
+        train_ratio=args.train_ratio,
+    )
+    dataset.data_list = dataset.data_list * 100
+    accelerator.print(f"Enlarged length of vkitti_video: {len(dataset)}")
+    return torch.utils.data.DataLoader(
+        dataset,
+        shuffle=True,
+        batch_size=1,
+        num_workers=2,
+        collate_fn=custom_collate_fn,
+        pin_memory=True,
+        persistent_workers=True,
+        drop_last=True,
+    )
+
+
 def get_data(data, args):
     # print(f"data {data if isinstance(data,str) else type(data)}")
     input_data = {
@@ -379,12 +550,12 @@ def launch_training_task(
     prob = args.get('prob', [1 for _ in range(len(train_dataloader_list))])
     grad_loss = GradientLoss3DSeparate()
 
-    pick_ranges = []
-    start = 0
-    for p in prob:
-        end = start + p
-        pick_ranges.append((start, end))
-        start = end
+    if len(prob) != len(train_dataloader_list):
+        raise ValueError(
+            f"Expected {len(train_dataloader_list)} dataset probabilities, got {len(prob)}."
+        )
+    if sum(prob) <= 0:
+        raise ValueError("At least one training dataset must have a positive probability.")
     set_seed(42)
 
     print(f"{rank} Entering training loop...")
@@ -581,114 +752,126 @@ if __name__ == "__main__":
     else:
         scheduler = torch.optim.lr_scheduler.ConstantLR(optimizer)
 
-    # Image training dataset
-    vikitt_train_dataset = VKITTIDataset(
-        args.train_data_dir_vkitti,
-        norm_type=args.norm_type,
-        train_ratio=args.train_ratio,
-    )
-    hypersim_train_dataset = HypersimDataset(
-        data_dir=args.train_data_dir_hypersim,
-        resolution=args.resolution_hypersim,
-        random_flip=args.random_flip,
-        norm_type=args.norm_type,
-        truncnorm_min=args.truncnorm_min,
-        align_cam_normal=args.align_cam_normal,
-        split="train",
-        train_ratio=args.train_ratio,
+    configured_prob = list(args.get("prob", []))
+    if len(configured_prob) != 6:
+        raise ValueError(
+            "Expected `prob` to contain 6 entries in the order "
+            "[hypersim_image, synthhuman_image, infinigen_image, vkitti_image, tartanair_video, vkitti_video]."
+        )
+    dataset_builders = [
+        (
+            "hypersim_image",
+            configured_prob[0],
+            lambda: torch.utils.data.DataLoader(
+                HypersimDataset(
+                    data_dir=args.train_data_dir_hypersim,
+                    resolution=args.resolution_hypersim,
+                    random_flip=args.random_flip,
+                    norm_type=args.norm_type,
+                    truncnorm_min=args.truncnorm_min,
+                    align_cam_normal=args.align_cam_normal,
+                    split="train",
+                    train_ratio=args.train_ratio,
+                ),
+                shuffle=True,
+                batch_size=args.batch_size,
+                num_workers=2,
+                collate_fn=custom_collate_fn,
+                pin_memory=True,
+                prefetch_factor=4,
+                persistent_workers=True,
+                drop_last=True,
+            ),
+        ),
+        (
+            "synthhuman_image",
+            configured_prob[1],
+            lambda: torch.utils.data.DataLoader(
+                SynthHumanDataset(
+                    data_dir=args.train_data_dir_synthhuman,
+                    resolution=args.resolution_hypersim,
+                    random_flip=args.random_flip,
+                    norm_type=args.norm_type,
+                    truncnorm_min=args.truncnorm_min,
+                    train_ratio=args.train_ratio,
+                ),
+                shuffle=True,
+                batch_size=args.batch_size,
+                num_workers=2,
+                collate_fn=custom_collate_fn,
+                pin_memory=True,
+                prefetch_factor=4,
+                persistent_workers=True,
+                drop_last=True,
+            ),
+        ),
+        (
+            "infinigen_image",
+            configured_prob[2],
+            lambda: torch.utils.data.DataLoader(
+                InfinigenDataset(
+                    data_dir=args.train_data_dir_infinigen,
+                    resolution=args.resolution_hypersim,
+                    random_flip=args.random_flip,
+                    norm_type=args.norm_type,
+                    truncnorm_min=args.truncnorm_min,
+                    train_ratio=args.train_ratio,
+                ),
+                shuffle=True,
+                batch_size=args.batch_size,
+                num_workers=2,
+                collate_fn=custom_collate_fn,
+                pin_memory=True,
+                prefetch_factor=4,
+                persistent_workers=True,
+                drop_last=True,
+            ),
+        ),
+        (
+            "vkitti_image",
+            configured_prob[3],
+            lambda: torch.utils.data.DataLoader(
+                VKITTIDataset(
+                    args.train_data_dir_vkitti,
+                    norm_type=args.norm_type,
+                    train_ratio=args.train_ratio,
+                ),
+                shuffle=True,
+                batch_size=args.batch_size,
+                num_workers=2,
+                collate_fn=custom_collate_fn,
+                pin_memory=True,
+                prefetch_factor=4,
+                persistent_workers=True,
+                drop_last=True,
+            ),
+        ),
+        (
+            "tartanair_video",
+            configured_prob[4],
+            lambda: _build_tartanair_video_dataloader(args, accelerator),
+        ),
+        (
+            "vkitti_video",
+            configured_prob[5],
+            lambda: _build_vkitti_video_dataloader(args, accelerator),
+        ),
+    ]
+    active_dataset_builders = [
+        (name, prob, build_fn)
+        for name, prob, build_fn in dataset_builders
+        if prob > 0
+    ]
+    if not active_dataset_builders:
+        raise ValueError("No active training datasets. Check the `prob` config.")
 
-    )
-    synthhuman_train_dataset = SynthHumanDataset(
-        data_dir=args.train_data_dir_synthhuman,
-        resolution=args.resolution_hypersim,
-        random_flip=args.random_flip,
-        norm_type=args.norm_type,
-        truncnorm_min=args.truncnorm_min,
-        train_ratio=args.train_ratio,
-    )
-    hypersim_train_dataloader = torch.utils.data.DataLoader(
-        hypersim_train_dataset,
-        shuffle=True,
-        batch_size=args.batch_size,
-        num_workers=2,
-        collate_fn=custom_collate_fn,
-        pin_memory=True,
-        prefetch_factor=4,
-        persistent_workers=True,
-        drop_last=True,
-    )
-    synthhuman_train_dataloader = torch.utils.data.DataLoader(
-        synthhuman_train_dataset,
-        shuffle=True,
-        batch_size=args.batch_size,
-        num_workers=2,
-        collate_fn=custom_collate_fn,
-        pin_memory=True,
-        prefetch_factor=4,
-        persistent_workers=True,
-        drop_last=True,
-    )
-    vkitti_train_dataloader = torch.utils.data.DataLoader(
-        vikitt_train_dataset,
-        shuffle=True,
-        batch_size=args.batch_size,
-        num_workers=2,
-        collate_fn=custom_collate_fn,
-        pin_memory=True,
-        prefetch_factor=4,
-        persistent_workers=True,
-        drop_last=True,
-    )
-    # Video training dataset
-    ttr_vid_train_dataset = TartanAir_VID_Dataset(
-        data_dir=args.train_data_dir_ttr_vid,
-        random_flip=args.random_flip,
-        norm_type=args.norm_type,
-        max_num_frame=args.max_num_frame,
-        min_num_frame=args.min_num_frame,
-        max_sample_stride=args.max_sample_stride,
-        min_sample_stride=args.min_sample_stride,
-        train_ratio=args.train_ratio,
-
-    )
-    vikitt_vid_train_dataset = VKITTI_VID_Dataset(
-        root_dir=args.train_data_dir_vkitti_vid,
-        norm_type=args.norm_type,
-        max_num_frame=args.max_num_frame,
-        min_num_frame=args.min_num_frame,
-        max_sample_stride=args.max_sample_stride,
-        min_sample_stride=args.min_sample_stride,
-        train_ratio=args.train_ratio,
-
-    )
-    # Enlarge the video dataset
-    ttr_vid_train_dataset.data_list = ttr_vid_train_dataset.data_list * 100
-    vikitt_vid_train_dataset.data_list = vikitt_vid_train_dataset.data_list * 100
-    
+    active_dataset_names = [name for name, _, _ in active_dataset_builders]
+    active_prob = [prob for _, prob, _ in active_dataset_builders]
     accelerator.print(
-        f"Enlarged length of ttr and vkitti: {len(ttr_vid_train_dataset)}, {len(vikitt_vid_train_dataset)}")
-
-    ttr_vid_train_dataloader = torch.utils.data.DataLoader(
-        ttr_vid_train_dataset,
-        shuffle=True,
-        batch_size=1,
-        num_workers=2,
-        collate_fn=custom_collate_fn,
-        pin_memory=True,
-        persistent_workers=True,
-        drop_last=True,
+        f"Active training datasets: {active_dataset_names} with prob {active_prob}"
     )
 
-    vkitti_vid_train_dataloader = torch.utils.data.DataLoader(
-        vikitt_vid_train_dataset,
-        shuffle=True,
-        batch_size=1,
-        num_workers=2,
-        collate_fn=custom_collate_fn,
-        pin_memory=True,
-        persistent_workers=True,
-        drop_last=True,
-    )
+    train_dataloader_list = [build_fn() for _, _, build_fn in active_dataset_builders]
     # Test set
     # kitti_vid_test_dataset = KITTI_VID_Dataset(
     #     data_root=args.kitti_vid_test_data_root,
@@ -742,11 +925,22 @@ if __name__ == "__main__":
     nyuv2_test_dataloader = []
 
     start_epoch, global_step = 0, 0
-    model, optimizer, scheduler, hypersim_train_dataloader, synthhuman_train_dataloader, vkitti_train_dataloader, ttr_vid_train_dataloader, vkitti_vid_train_dataloader, kitti_vid_test_dataloader, scannet_vid_test_dataloader, nyuv2_test_dataloader = (
+    prepared = (
         accelerator.prepare(
-            model, optimizer, scheduler, hypersim_train_dataloader, synthhuman_train_dataloader, vkitti_train_dataloader, ttr_vid_train_dataloader, vkitti_vid_train_dataloader, kitti_vid_test_dataloader, scannet_vid_test_dataloader, nyuv2_test_dataloader
+            model,
+            optimizer,
+            scheduler,
+            *train_dataloader_list,
+            kitti_vid_test_dataloader,
+            scannet_vid_test_dataloader,
+            nyuv2_test_dataloader,
         )
     )
+    model = prepared[0]
+    optimizer = prepared[1]
+    scheduler = prepared[2]
+    train_dataloader_list = list(prepared[3:-3])
+    kitti_vid_test_dataloader, scannet_vid_test_dataloader, nyuv2_test_dataloader = prepared[-3:]
 
     if args.resume and args.training_state_dir is not None:
 
@@ -789,10 +983,6 @@ if __name__ == "__main__":
         accelerator.print("Training state loaded.")
         accelerator.wait_for_everyone()
 
-    # Hard code to the order of 'hypersim', 'synthhuman', 'vikitti', 'ttr', 'vkitti'
-    dataloader_list = [hypersim_train_dataloader, synthhuman_train_dataloader,
-                       vkitti_train_dataloader, ttr_vid_train_dataloader, vkitti_vid_train_dataloader]
-
     if hasattr(model, 'module'):
         model = model.module
 
@@ -810,7 +1000,7 @@ if __name__ == "__main__":
 
     launch_training_task(
         accelerator=accelerator,
-        train_dataloader_list=dataloader_list,
+        train_dataloader_list=train_dataloader_list,
         test_loader_dict=test_loader_dict,
         dataset_range=dataset_range,
         start_epoch=start_epoch,
@@ -822,5 +1012,5 @@ if __name__ == "__main__":
         num_epochs=args.num_epochs,
         validate_step=args.validate_step,
         log_step=args.log_step,
-        args=args,
+        args=OmegaConf.merge(args, {"prob": active_prob}),
     )

@@ -12,3 +12,9 @@
   - loader draw ratio: how often a loader is sampled;
   - sample exposure: how many actual training samples come from each loader after batch-size differences.
   For this repo, sample exposure is usually the more useful quantity.
+- Partial-render / alpha-mask idea:
+  - The current training path does not support alpha-conditioned inputs. Dataset images are loaded as RGB, and the model is trained on VAE latents from RGB plus disparity/depth targets.
+  - The low-risk version is a `loss_mask` only: add a per-pixel mask in the dataset sample, stack it in the collate function, and use it only to weight the training loss.
+  - In this repo the main depth loss is computed in latent space, not after VAE decode. A practical implementation would downsample the image-space mask to latent resolution and apply it as a float weighting tensor on the latent MSE (and, if desired, gradient loss).
+  - The latent mask does not need to be boolean. A soft float mask is preferable because one latent cell corresponds to a patch of pixels; fractional values can represent partial coverage after downsampling.
+  - This would let partially rendered CG frames contribute supervision only where valid depth exists, without changing the VAE input channel count or adding a new conditioning path.
