@@ -320,16 +320,16 @@ class InfinigenDataset(Dataset):
 
 
 def _sigint_handler(signum, frame):
-    del signum, frame
+    del frame
     global _interrupt_requested, _interrupt_count
     _interrupt_count += 1
     if _interrupt_count >= 2:
         raise KeyboardInterrupt
     _interrupt_requested = True
-    print(
-        "\nSIGINT received. Training will pause at the next safe point."
+    sig_name = "SIGINT" if signum == signal.SIGINT else "SIGTERM"
+    tqdm.write(
+        f"\n{sig_name} received. Training will pause at the next safe point."
         " Press Ctrl+C again to exit immediately.",
-        flush=True,
     )
 
 
@@ -409,10 +409,12 @@ def _save_checkpoint_on_interrupt(
 
 
 def maybe_save_and_exit_on_interrupt(accelerator, model, model_logger, global_step, args):
-    global _interrupt_requested
+    global _interrupt_requested, _interrupt_count
     if not _interrupt_requested:
         return False, global_step
 
+    # Reset count so a Ctrl+C during the save prompt doesn't immediately kill.
+    _interrupt_count = 0
     _save_checkpoint_on_interrupt(
         accelerator=accelerator,
         model=model,
@@ -587,6 +589,10 @@ def launch_training_task(
         raise ValueError("At least one training dataset must have a positive probability.")
     set_seed(42)
 
+    # Re-register signal handlers in case accelerate/torch overrode them.
+    signal.signal(signal.SIGINT, _sigint_handler)
+    signal.signal(signal.SIGTERM, _sigint_handler)
+
     print(f"{rank} Entering training loop...")
     _last_known_global_step = global_step
 
@@ -748,6 +754,7 @@ if __name__ == "__main__":
         kwargs_handlers=[process_group_kwargs],
     )
     signal.signal(signal.SIGINT, _sigint_handler)
+    signal.signal(signal.SIGTERM, _sigint_handler)
     accelerator.print(OmegaConf.to_yaml(cfg))
 
     # set_seed(42)
