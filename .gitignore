@@ -16,7 +16,7 @@ models
 omni/
 pcd/
 saves/
-
+ap1.sh
 models/
 models_ms/
 !diffsynth/models**
