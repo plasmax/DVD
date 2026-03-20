@@ -561,7 +561,13 @@ def launch_training_task(
     print(f"{rank} Entering training loop...")
 
     for epoch_id in range(num_epochs):
-        for small_batch_step in tqdm(range(100_000), desc=f"Epoch {epoch_id + 1}/{num_epochs}", disable=not accelerator.is_main_process):
+        progress_bar = tqdm(
+            range(100_000),
+            desc=f"Epoch {epoch_id + 1}/{num_epochs}",
+            disable=not accelerator.is_main_process,
+        )
+        progress_bar.set_postfix(global_step=global_step)
+        for small_batch_step in progress_bar:
 
             select_pos = random.choices(
                 population=range(len(train_dataloader_list)),
@@ -624,6 +630,8 @@ def launch_training_task(
                     optimizer.zero_grad(set_to_none=True)
                     scheduler.step()
                     global_step += 1
+                    if accelerator.is_main_process:
+                        progress_bar.set_postfix(global_step=global_step)
                     # print(f"Step at {global_step} microstep {small_batch_step}")
 
                     # Calculate the average loss across all processes
