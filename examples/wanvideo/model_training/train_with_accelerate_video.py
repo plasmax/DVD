@@ -3,6 +3,7 @@ import gc
 import os
 import random
 import signal
+import sys
 import time
 from datetime import timedelta
 from itertools import cycle
@@ -46,6 +47,7 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 _interrupt_requested = False
 _interrupt_count = 0
+_last_known_global_step = 0
 
 
 def load_synthhuman_depth_exr(depth_path):
@@ -331,26 +333,37 @@ def _sigint_handler(signum, frame):
     )
 
 
-def maybe_save_and_exit_on_interrupt(accelerator, model, model_logger, global_step, args):
-    global _interrupt_requested
-    if not _interrupt_requested:
-        return False, global_step
-
+def _save_checkpoint_on_interrupt(
+    accelerator,
+    model,
+    model_logger,
+    global_step,
+    args,
+    prompt_user=True,
+):
     decision_path = os.path.join(model_logger.output_path, ".sigint_decision")
 
     if accelerator.is_main_process:
-        while True:
-            answer = input(
-                f"\nCtrl+C received at global step {global_step}. "
-                "Save checkpoint before exiting? [y/N]: "
-            ).strip().lower()
-            if answer in ("", "n", "no"):
-                decision = "exit"
-                break
-            if answer in ("y", "yes"):
-                decision = "save"
-                break
-            print("Please answer 'y' or 'n'.", flush=True)
+        decision = "save"
+        if prompt_user and sys.stdin is not None and sys.stdin.isatty():
+            while True:
+                answer = input(
+                    f"\nCtrl+C received at global step {global_step}. "
+                    "Save checkpoint before exiting? [y/N]: "
+                ).strip().lower()
+                if answer in ("", "n", "no"):
+                    decision = "exit"
+                    break
+                if answer in ("y", "yes"):
+                    decision = "save"
+                    break
+                print("Please answer 'y' or 'n'.", flush=True)
+        elif prompt_user:
+            print(
+                f"\nCtrl+C received at global step {global_step}, but no interactive "
+                "stdin is available. Saving a checkpoint before exit.",
+                flush=True,
+            )
         with open(decision_path, "w") as f:
             f.write(decision)
 
@@ -392,6 +405,21 @@ def maybe_save_and_exit_on_interrupt(accelerator, model, model_logger, global_st
         )
         model.pipe.dit.train()
 
+    return decision == "save"
+
+
+def maybe_save_and_exit_on_interrupt(accelerator, model, model_logger, global_step, args):
+    global _interrupt_requested
+    if not _interrupt_requested:
+        return False, global_step
+
+    _save_checkpoint_on_interrupt(
+        accelerator=accelerator,
+        model=model,
+        model_logger=model_logger,
+        global_step=global_step,
+        args=args,
+    )
     _interrupt_requested = False
     return True, global_step
 
@@ -503,6 +531,7 @@ def launch_training_task(
     validate_step: int = 500,
     log_step: int = 10,
 ):
+    global _last_known_global_step
     validator = Validation()
     accelerator.print(
         f"Initial accelerator with gradient accumulation steps: {accelerator.gradient_accumulation_steps}"
@@ -559,6 +588,7 @@ def launch_training_task(
     set_seed(42)
 
     print(f"{rank} Entering training loop...")
+    _last_known_global_step = global_step
 
     for epoch_id in range(num_epochs):
         progress_bar = tqdm(
@@ -630,6 +660,7 @@ def launch_training_task(
                     optimizer.zero_grad(set_to_none=True)
                     scheduler.step()
                     global_step += 1
+                    _last_known_global_step = global_step
                     if accelerator.is_main_process:
                         progress_bar.set_postfix(global_step=global_step)
                     # print(f"Step at {global_step} microstep {small_batch_step}")
@@ -1006,19 +1037,34 @@ if __name__ == "__main__":
         'nyuv2': [1e-3, 10],
     }
 
-    launch_training_task(
-        accelerator=accelerator,
-        train_dataloader_list=train_dataloader_list,
-        test_loader_dict=test_loader_dict,
-        dataset_range=dataset_range,
-        start_epoch=start_epoch,
-        global_step=global_step,
-        model=model,
-        model_logger=model_logger,
-        optimizer=optimizer,
-        scheduler=scheduler,
-        num_epochs=args.num_epochs,
-        validate_step=args.validate_step,
-        log_step=args.log_step,
-        args=OmegaConf.merge(args, {"prob": active_prob}),
-    )
+    merged_args = OmegaConf.merge(args, {"prob": active_prob})
+    try:
+        launch_training_task(
+            accelerator=accelerator,
+            train_dataloader_list=train_dataloader_list,
+            test_loader_dict=test_loader_dict,
+            dataset_range=dataset_range,
+            start_epoch=start_epoch,
+            global_step=global_step,
+            model=model,
+            model_logger=model_logger,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            num_epochs=args.num_epochs,
+            validate_step=args.validate_step,
+            log_step=args.log_step,
+            args=merged_args,
+        )
+    except KeyboardInterrupt:
+        print(
+            "\nKeyboardInterrupt received before the next safe point.",
+            flush=True,
+        )
+        _save_checkpoint_on_interrupt(
+            accelerator=accelerator,
+            model=model,
+            model_logger=model_logger,
+            global_step=_last_known_global_step,
+            args=merged_args,
+        )
+        accelerator.end_training()
