@@ -379,18 +379,27 @@ def _save_checkpoint_on_interrupt(
     if accelerator.is_main_process:
         decision = "save"
         if prompt_user and sys.stdin is not None and sys.stdin.isatty():
-            while True:
-                answer = input(
-                    f"\nCtrl+C received at global step {global_step}. "
-                    "Save checkpoint before exiting? [y/N]: "
-                ).strip().lower()
-                if answer in ("", "n", "no"):
-                    decision = "exit"
-                    break
-                if answer in ("y", "yes"):
-                    decision = "save"
-                    break
-                print("Please answer 'y' or 'n'.", flush=True)
+            try:
+                while True:
+                    answer = input(
+                        f"\nCtrl+C received at global step {global_step}. "
+                        "Save checkpoint before exiting? [y/N]: "
+                    ).strip().lower()
+                    if answer in ("", "n", "no"):
+                        decision = "exit"
+                        break
+                    if answer in ("y", "yes"):
+                        decision = "save"
+                        break
+                    print("Please answer 'y' or 'n'.", flush=True)
+            except (OSError, EOFError):
+                # stdin lost (e.g. parent process died) — save by default.
+                print(
+                    f"\nCtrl+C received at global step {global_step}, but stdin "
+                    "is gone. Saving a checkpoint before exit.",
+                    flush=True,
+                )
+                decision = "save"
         elif prompt_user:
             print(
                 f"\nCtrl+C received at global step {global_step}, but no interactive "
