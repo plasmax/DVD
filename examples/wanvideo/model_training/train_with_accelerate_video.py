@@ -655,7 +655,7 @@ def launch_training_task(
                     loss += grad_co * (_grad_t+_grad_h+_grad_w)
                 accumulate_grad_loss += loss.item()
                 
-                # accelerator.print(f"Microstep {small_batch_step} total loss: {loss.item()} pred_depth shape: {pred_depth.shape}, gt_depth shape: {depth_gt.shape}")
+                accelerator.print(f"Microstep {small_batch_step} total loss: {loss.item()} pred_depth shape: {pred_depth.shape}, gt_depth shape: {depth_gt.shape}")
                 accelerator.backward(loss)
                 acm_cnt += 1
 
@@ -672,7 +672,7 @@ def launch_training_task(
                     _last_known_global_step = global_step
                     if accelerator.is_main_process:
                         progress_bar.set_postfix(global_step=global_step)
-                    # print(f"Step at {global_step} microstep {small_batch_step}")
+                    print(f"Step at {global_step} microstep {small_batch_step}")
 
                     # Calculate the average loss across all processes
                     if global_step % log_step == 0:
