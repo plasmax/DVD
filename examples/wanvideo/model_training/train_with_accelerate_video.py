@@ -323,6 +323,12 @@ def _sigint_handler(signum, frame):
     del frame
     global _interrupt_requested, _interrupt_count
     _interrupt_count += 1
+    # Write to a file first — this works even if all pipes are broken.
+    try:
+        with open("/tmp/_sigint_debug.log", "a") as f:
+            f.write(f"handler fired: signal={signum}, count={_interrupt_count}\n")
+    except Exception:
+        pass
     if _interrupt_count >= 2:
         raise KeyboardInterrupt
     _interrupt_requested = True
@@ -597,6 +603,9 @@ def launch_training_task(
     # Re-register signal handlers in case accelerate/torch overrode them.
     signal.signal(signal.SIGINT, _sigint_handler)
     signal.signal(signal.SIGTERM, _sigint_handler)
+    _h = signal.getsignal(signal.SIGINT)
+    print(f"{rank} SIGINT handler before loop: {_h} (ours={_h is _sigint_handler})",
+          file=sys.stderr, flush=True)
 
     print(f"{rank} Entering training loop...")
     _last_known_global_step = global_step
@@ -609,6 +618,14 @@ def launch_training_task(
         )
         progress_bar.set_postfix(global_step=global_step)
         for small_batch_step in progress_bar:
+            # DEBUG: verify handler is still ours every 10 steps
+            if small_batch_step % 10 == 0:
+                _h = signal.getsignal(signal.SIGINT)
+                if _h is not _sigint_handler:
+                    print(f"[WARNING] SIGINT handler overridden at step {small_batch_step}! "
+                          f"Now: {_h}", file=sys.stderr, flush=True)
+                    signal.signal(signal.SIGINT, _sigint_handler)
+                    signal.signal(signal.SIGTERM, _sigint_handler)
 
             select_pos = random.choices(
                 population=range(len(train_dataloader_list)),
