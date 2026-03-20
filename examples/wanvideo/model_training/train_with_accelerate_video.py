@@ -327,10 +327,13 @@ def _sigint_handler(signum, frame):
         raise KeyboardInterrupt
     _interrupt_requested = True
     sig_name = "SIGINT" if signum == signal.SIGINT else "SIGTERM"
-    tqdm.write(
-        f"\n{sig_name} received. Training will pause at the next safe point."
-        " Press Ctrl+C again to exit immediately.",
-    )
+    try:
+        tqdm.write(
+            f"\n{sig_name} received. Training will pause at the next safe point."
+            " Press Ctrl+C again to exit immediately.",
+        )
+    except (BrokenPipeError, OSError):
+        pass  # stdout pipe may be broken (e.g. tee died from SIGINT)
 
 
 def _save_checkpoint_on_interrupt(
