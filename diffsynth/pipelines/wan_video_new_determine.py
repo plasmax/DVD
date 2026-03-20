@@ -1581,6 +1581,7 @@ def model_fn_wan_video(
     cfg_merge: bool = False,
     use_gradient_checkpointing: bool = False,
     use_gradient_checkpointing_offload: bool = False,
+    gradient_checkpoint_every_n: int = 1,
     **kwargs,
 ):
     if sliding_window_size is not None and sliding_window_stride is not None:
@@ -1680,7 +1681,8 @@ def model_fn_wan_video(
             return custom_forward
 
         for idx, block in enumerate(dit.blocks):
-            if use_gradient_checkpointing_offload:
+            should_checkpoint = (use_gradient_checkpointing or use_gradient_checkpointing_offload) and idx % gradient_checkpoint_every_n == 0
+            if should_checkpoint and use_gradient_checkpointing_offload:
                 with torch.autograd.graph.save_on_cpu():
                     latents = torch.utils.checkpoint.checkpoint(
                         create_custom_forward(block),
@@ -1690,7 +1692,7 @@ def model_fn_wan_video(
                         freqs,
                         use_reentrant=False,
                     )
-            elif use_gradient_checkpointing:
+            elif should_checkpoint:
                 latents = torch.utils.checkpoint.checkpoint(
                     create_custom_forward(block),
                     latents,

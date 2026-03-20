@@ -47,6 +47,7 @@ def usp_dit_forward(self,
             y: Optional[torch.Tensor] = None,
             use_gradient_checkpointing: bool = False,
             use_gradient_checkpointing_offload: bool = False,
+            gradient_checkpoint_every_n: int = 1,
             **kwargs,
             ):
     t = self.time_embedding(
@@ -77,21 +78,21 @@ def usp_dit_forward(self,
         x, get_sequence_parallel_world_size(),
         dim=1)[get_sequence_parallel_rank()]
 
-    for block in self.blocks:
-        if self.training and use_gradient_checkpointing:
-            if use_gradient_checkpointing_offload:
-                with torch.autograd.graph.save_on_cpu():
-                    x = torch.utils.checkpoint.checkpoint(
-                        create_custom_forward(block),
-                        x, context, t_mod, freqs,
-                        use_reentrant=False,
-                    )
-            else:
+    for idx, block in enumerate(self.blocks):
+        should_checkpoint = self.training and (use_gradient_checkpointing or use_gradient_checkpointing_offload) and idx % gradient_checkpoint_every_n == 0
+        if should_checkpoint and use_gradient_checkpointing_offload:
+            with torch.autograd.graph.save_on_cpu():
                 x = torch.utils.checkpoint.checkpoint(
                     create_custom_forward(block),
                     x, context, t_mod, freqs,
                     use_reentrant=False,
                 )
+        elif should_checkpoint:
+            x = torch.utils.checkpoint.checkpoint(
+                create_custom_forward(block),
+                x, context, t_mod, freqs,
+                use_reentrant=False,
+            )
         else:
             x = block(x, context, t_mod, freqs)
 

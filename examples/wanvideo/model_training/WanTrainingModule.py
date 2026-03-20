@@ -33,6 +33,7 @@ class WanTrainingModule(DiffusionTrainingModule):
         lora_target_modules='q,k,v,o,ffn.0,ffn.2',
         use_gradient_checkpointing=True,
         use_gradient_checkpointing_offload=False,
+        gradient_checkpoint_every_n=1,
 
     ):
         super().__init__()
@@ -90,6 +91,7 @@ class WanTrainingModule(DiffusionTrainingModule):
         # Store other configs
         self.use_gradient_checkpointing = use_gradient_checkpointing
         self.use_gradient_checkpointing_offload = use_gradient_checkpointing_offload
+        self.gradient_checkpoint_every_n = gradient_checkpoint_every_n
         self.accelerator = accelerator
         self.args = args
 
@@ -150,6 +152,7 @@ class WanTrainingModule(DiffusionTrainingModule):
             "rand_device": self.pipe.device,
             "use_gradient_checkpointing": self.use_gradient_checkpointing,
             "use_gradient_checkpointing_offload": self.use_gradient_checkpointing_offload,
+            "gradient_checkpoint_every_n": self.gradient_checkpoint_every_n,
             "cfg_merge": False,
             "vace_scale": 1,
         }

@@ -54,6 +54,7 @@ class VaceWanModel(torch.nn.Module):
         self, x, vace_context, context, t_mod, freqs,
         use_gradient_checkpointing: bool = False,
         use_gradient_checkpointing_offload: bool = False,
+        gradient_checkpoint_every_n: int = 1,
     ):
         c = [self.vace_patch_embedding(u.unsqueeze(0)) for u in vace_context]
         c = [u.flatten(2).transpose(1, 2) for u in c]
@@ -67,15 +68,16 @@ class VaceWanModel(torch.nn.Module):
                 return module(*inputs)
             return custom_forward
         
-        for block in self.vace_blocks:
-            if use_gradient_checkpointing_offload:
+        for idx, block in enumerate(self.vace_blocks):
+            should_checkpoint = (use_gradient_checkpointing or use_gradient_checkpointing_offload) and idx % gradient_checkpoint_every_n == 0
+            if should_checkpoint and use_gradient_checkpointing_offload:
                 with torch.autograd.graph.save_on_cpu():
                     c = torch.utils.checkpoint.checkpoint(
                         create_custom_forward(block),
                         c, x, context, t_mod, freqs,
                         use_reentrant=False,
                     )
-            elif use_gradient_checkpointing:
+            elif should_checkpoint:
                 c = torch.utils.checkpoint.checkpoint(
                     create_custom_forward(block),
                     c, x, context, t_mod, freqs,

@@ -768,6 +768,7 @@ if __name__ == "__main__":
         model_id_with_origin_paths=args.model_id_with_origin_paths,
         trainable_models=args.trainable_models,
         use_gradient_checkpointing=args.use_gradient_checkpointing,
+        gradient_checkpoint_every_n=getattr(args, 'gradient_checkpoint_every_n', 1),
         lora_rank=args.lora_rank,
         lora_base_model=args.lora_base_model,
         args=args,
