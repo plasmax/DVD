@@ -187,6 +187,16 @@ class VKITTI_VID_Dataset(Dataset):
                         self.root_dir, f'Scene{scene}/{cond}/frames/depth/Camera_{cam}')
                     res_dict['rgb_dir'] = _rgb_dir
                     res_dict['depth_dir'] = _depth_dir
+                    res_dict["img_path_list"] = sorted(
+                        os.path.join(_rgb_dir, rgb_file)
+                        for rgb_file in os.listdir(_rgb_dir)
+                        if rgb_file.endswith(".jpg")
+                    )
+                    res_dict["depth_path_list"] = sorted(
+                        os.path.join(_depth_dir, depth_file)
+                        for depth_file in os.listdir(_depth_dir)
+                        if depth_file.endswith(".png")
+                    )
 
                     self.data_list.append(res_dict)
 
@@ -213,22 +223,8 @@ class VKITTI_VID_Dataset(Dataset):
             cam = self.data_list[idx]["cam"]
             rgb_dir = self.data_list[idx]["rgb_dir"]
             depth_dir = self.data_list[idx]["depth_dir"]
-
-            img_path_list = []
-            depth_path_list = []
-            for rgb_file in os.listdir(rgb_dir):
-                if not rgb_file.endswith(".jpg"):
-                    continue
-                _rgb_path = os.path.join(rgb_dir, rgb_file)
-                img_path_list.append(_rgb_path)
-
-            for depth_file in os.listdir(depth_dir):
-                if not depth_file.endswith(".png"):
-                    continue
-                _depth_path = os.path.join(depth_dir, depth_file)
-                depth_path_list.append(_depth_path)
-            img_path_list = sorted(img_path_list)
-            depth_path_list = sorted(depth_path_list)
+            img_path_list = self.data_list[idx]["img_path_list"]
+            depth_path_list = self.data_list[idx]["depth_path_list"]
             assert len(img_path_list) == len(depth_path_list)
 
             # Handling index
