@@ -8,7 +8,7 @@ class GradientLoss3DSeparate(nn.Module):
         super().__init__()
         self.p = p
 
-    def forward(self, x, target):
+    def forward(self, x, target) -> tuple:
         _, _, T, H, W = x.shape
         assert x.shape == target.shape
         if T > 1:
