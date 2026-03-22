@@ -60,7 +60,12 @@ class _TeeStream:
     def write(self, data):
         self._original.write(data)
         try:
-            self._log_file.write(data)
+            # tqdm redraws the active progress line with carriage returns.
+            # Mirroring those raw fragments into the log file produces
+            # truncated lines like `global_stMicrostep ...`.
+            if "\r" in data and "\n" not in data:
+                return
+            self._log_file.write(data.replace("\r", "\n"))
         except Exception:
             pass
 
@@ -104,6 +109,11 @@ def load_synthhuman_depth_exr(depth_path):
         return depth
     finally:
         exr_file.close()
+
+
+def _progress_log(message):
+    tqdm.write(message, file=sys.stdout)
+    sys.stdout.flush()
 
 
 def sanitize_infinigen_depth(depth):
@@ -693,7 +703,12 @@ def launch_training_task(
                     loss += grad_co * (_grad_t+_grad_h+_grad_w)
                 accumulate_grad_loss += loss.item()
                 
-                accelerator.print(f"Microstep {small_batch_step} total loss: {loss.item()} pred_depth shape: {pred_depth.shape}, gt_depth shape: {depth_gt.shape}")
+                if accelerator.is_main_process:
+                    _progress_log(
+                        f"Microstep {small_batch_step} total loss: {loss.item()} "
+                        f"pred_depth shape: {pred_depth.shape}, "
+                        f"gt_depth shape: {depth_gt.shape}"
+                    )
                 accelerator.backward(loss)
                 acm_cnt += 1
 
@@ -710,7 +725,9 @@ def launch_training_task(
                     _last_known_global_step = global_step
                     if accelerator.is_main_process:
                         progress_bar.set_postfix(global_step=global_step)
-                    print(f"Step at {global_step} microstep {small_batch_step}")
+                        _progress_log(
+                            f"Step at {global_step} microstep {small_batch_step}"
+                        )
 
                     # Calculate the average loss across all processes
                     if global_step % log_step == 0:
@@ -719,11 +736,12 @@ def launch_training_task(
 
                         accumulate_grad_loss = accumulate_grad_loss - accumulate_depth_loss
 
-                        tqdm.write(
-                            f"GPU {rank} step {global_step}: depth loss = {accumulate_depth_loss:.6f}, grad_loss = {accumulate_grad_loss:.6f}, learning rate : {scheduler.get_last_lr()[0]:.8f}",
-                            file=sys.stdout,
+                        _progress_log(
+                            f"GPU {rank} step {global_step}: depth loss = "
+                            f"{accumulate_depth_loss:.6f}, grad_loss = "
+                            f"{accumulate_grad_loss:.6f}, learning rate : "
+                            f"{scheduler.get_last_lr()[0]:.8f}"
                         )
-                        sys.stdout.flush()
                         accumulate_depth_loss = 0.0
                         accumulate_grad_loss = 0.0
                         acm_cnt = 0
