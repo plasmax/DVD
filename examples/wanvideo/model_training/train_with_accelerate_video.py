@@ -705,9 +705,7 @@ def launch_training_task(
                 
                 if accelerator.is_main_process:
                     _progress_log(
-                        f"Microstep {small_batch_step} total loss: {loss.item()} "
-                        f"pred_depth shape: {pred_depth.shape}, "
-                        f"gt_depth shape: {depth_gt.shape}"
+                        f"Small batch step {small_batch_step} total loss: {loss.item()} "
                     )
                 accelerator.backward(loss)
                 acm_cnt += 1
@@ -726,7 +724,7 @@ def launch_training_task(
                     if accelerator.is_main_process:
                         progress_bar.set_postfix(global_step=global_step)
                         _progress_log(
-                            f"Step at {global_step} microstep {small_batch_step}"
+                            f"Global step at {global_step}, small batch step {small_batch_step}"
                         )
 
                     # Calculate the average loss across all processes
