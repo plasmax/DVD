@@ -9,6 +9,7 @@ from datetime import timedelta
 from itertools import cycle
 from pathlib import Path
 
+import csv
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -598,21 +599,26 @@ def launch_training_task(
 
     accelerator.print(f"Validate every {validate_step} steps.")
 
+    loss_csv_path = os.path.join(model_logger.output_path, "loss_log.csv")
+    if accelerator.is_main_process and not os.path.exists(loss_csv_path):
+        with open(loss_csv_path, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["global_step", "depth_loss", "grad_loss", "learning_rate"])
+
     if args.init_validate:
         accelerator.print(
             f"Starting validation with model at epoch {start_epoch}, global step {global_step}"
         )
         model.pipe.dit.eval()
-        # Initial validation disabled for quick smoke runs.
-        # validator.validate(
-        #     accelerator=accelerator,
-        #     dataset_range=dataset_range,
-        #     pipe=model.pipe,
-        #     global_step=global_step,
-        #     args=args,
-        #     test_loader_dict=test_loader_dict,
-        #     output_path=model_logger.output_path,
-        # )
+        validator.validate(
+            accelerator=accelerator,
+            dataset_range=dataset_range,
+            pipe=model.pipe,
+            global_step=global_step,
+            args=args,
+            test_loader_dict=test_loader_dict,
+            output_path=model_logger.output_path,
+        )
 
         model.pipe.scheduler.set_timesteps(
             training=True,
@@ -734,12 +740,17 @@ def launch_training_task(
 
                         accumulate_grad_loss = accumulate_grad_loss - accumulate_depth_loss
 
+                        lr = scheduler.get_last_lr()[0]
                         _progress_log(
                             f"GPU {rank} step {global_step}: depth loss = "
                             f"{accumulate_depth_loss:.6f}, grad_loss = "
                             f"{accumulate_grad_loss:.6f}, learning rate : "
-                            f"{scheduler.get_last_lr()[0]:.8f}"
+                            f"{lr:.8f}"
                         )
+                        if accelerator.is_main_process:
+                            with open(loss_csv_path, "a", newline="") as f:
+                                writer = csv.writer(f)
+                                writer.writerow([global_step, accumulate_depth_loss, accumulate_grad_loss, lr])
                         accumulate_depth_loss = 0.0
                         accumulate_grad_loss = 0.0
                         acm_cnt = 0
@@ -760,16 +771,15 @@ def launch_training_task(
                             )
                             accelerator.print(
                                 f"Checkpoint saved at step {global_step}")
-                        # Validation disabled for quick smoke runs.
-                        # validator.validate(
-                        #     accelerator=accelerator,
-                        #     pipe=model.pipe,
-                        #     dataset_range=dataset_range,
-                        #     global_step=global_step,
-                        #     args=args,
-                        #     test_loader_dict=test_loader_dict,
-                        #     output_path=model_logger.output_path,
-                        # )
+                        validator.validate(
+                            accelerator=accelerator,
+                            pipe=model.pipe,
+                            dataset_range=dataset_range,
+                            global_step=global_step,
+                            args=args,
+                            test_loader_dict=test_loader_dict,
+                            output_path=model_logger.output_path,
+                        )
 
                         model.pipe.scheduler.set_timesteps(
                             training=True,
