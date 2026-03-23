@@ -20,10 +20,12 @@ from __future__ import annotations
 import argparse
 import os
 import shutil
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import h5py
 import numpy as np
+from tqdm import tqdm
 
 
 # ---------------------------------------------------------------------------
@@ -123,7 +125,7 @@ def remove_empty_dirs(root: Path) -> int:
     return removed
 
 
-def clean(dataset_root: Path, *, dry_run: bool = False) -> None:
+def clean(dataset_root: Path, *, dry_run: bool = False, workers: int = 1) -> None:
     train_dir = dataset_root / "train"
     if not train_dir.is_dir():
         raise SystemExit(f"ERROR: train directory not found: {train_dir}")
@@ -144,13 +146,27 @@ def clean(dataset_root: Path, *, dry_run: bool = False) -> None:
 
     # 3. Validate depth and mark invalid samples for deletion.
     invalid_files: set[Path] = set()
-    n_invalid = 0
-    for img, dep, nor in samples:
+
+    def validate_sample(sample: tuple[Path, Path, Path]) -> tuple[Path, Path, Path, str | None]:
+        img, dep, nor = sample
         if not dep.is_file():
             reason = "depth file missing"
         else:
             reason = validate_depth(dep)
+        return img, dep, nor, reason
 
+    n_invalid = 0
+    if workers <= 1:
+        validation_results = map(validate_sample, samples)
+    else:
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            validation_results = executor.map(validate_sample, samples)
+
+    for img, dep, nor, reason in tqdm(
+        validation_results,
+        total=len(samples),
+        desc="Validating depth samples",
+    ):
         if reason is not None:
             n_invalid += 1
             print(f"  INVALID ({reason}): {dep}")
@@ -217,8 +233,14 @@ def main() -> None:
         action="store_true",
         help="Only print what would be deleted; do not remove anything.",
     )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=min(32, (os.cpu_count() or 1) * 4),
+        help="Number of worker threads used for depth validation.",
+    )
     args = parser.parse_args()
-    clean(args.dataset_dir, dry_run=args.dry_run)
+    clean(args.dataset_dir, dry_run=args.dry_run, workers=max(1, args.workers))
 
 
 if __name__ == "__main__":
