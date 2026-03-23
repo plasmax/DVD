@@ -26,6 +26,7 @@ outputs/
 inference_results/
 *.mp4
 *.pdf
+*.png
 ckpt/DVD
 .msc
 .mv
