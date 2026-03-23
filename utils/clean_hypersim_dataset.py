@@ -78,27 +78,35 @@ def validate_depth(dep_path: Path) -> str | None:
 # Core logic
 # ---------------------------------------------------------------------------
 
+def get_scene_roots(dataset_dir: Path) -> list[Path]:
+    """Return top-level scene directories if present, else the dataset root itself."""
+    scene_roots = sorted(p for p in dataset_dir.iterdir() if p.is_dir() and p.name.startswith("ai_"))
+    return scene_roots or [dataset_dir]
+
+
 def discover_samples(train_dir: Path) -> list[tuple[Path, Path, Path]]:
     """Return ``(rgb, depth, normal)`` triples found under *train_dir*.
 
     Mirrors the discovery logic in ``HypersimDataset.__init__``.
     """
     samples: list[tuple[Path, Path, Path]] = []
-    for root, _dirs, files in os.walk(train_dir):
-        for fname in files:
-            if fname.endswith("tonemap.jpg"):
-                img = Path(root) / fname
-                dep = Path(
-                    str(img)
-                    .replace("final_preview", "geometry_hdf5")
-                    .replace("tonemap.jpg", "depth_meters.hdf5")
-                )
-                nor = Path(
-                    str(img)
-                    .replace("final_preview", "geometry_hdf5")
-                    .replace("tonemap.jpg", "normal_cam.hdf5")
-                )
-                samples.append((img, dep, nor))
+    scene_roots = get_scene_roots(train_dir)
+    for scene_root in tqdm(scene_roots, desc="Discovering samples", unit="scene"):
+        for root, _dirs, files in os.walk(scene_root):
+            for fname in files:
+                if fname.endswith("tonemap.jpg"):
+                    img = Path(root) / fname
+                    dep = Path(
+                        str(img)
+                        .replace("final_preview", "geometry_hdf5")
+                        .replace("tonemap.jpg", "depth_meters.hdf5")
+                    )
+                    nor = Path(
+                        str(img)
+                        .replace("final_preview", "geometry_hdf5")
+                        .replace("tonemap.jpg", "normal_cam.hdf5")
+                    )
+                    samples.append((img, dep, nor))
     samples.sort()
     return samples
 
@@ -106,29 +114,53 @@ def discover_samples(train_dir: Path) -> list[tuple[Path, Path, Path]]:
 def collect_all_files(train_dir: Path) -> set[Path]:
     """Return every file under *train_dir*."""
     all_files: set[Path] = set()
-    for root, _dirs, files in os.walk(train_dir):
-        for fname in files:
-            all_files.add(Path(root) / fname)
+    scene_roots = get_scene_roots(train_dir)
+    for scene_root in tqdm(scene_roots, desc="Collecting files", unit="scene"):
+        for root, _dirs, files in os.walk(scene_root):
+            for fname in files:
+                all_files.add(Path(root) / fname)
     return all_files
 
 
 def remove_empty_dirs(root: Path) -> int:
     """Bottom-up removal of empty directories. Returns count removed."""
     removed = 0
-    for dirpath, dirnames, filenames in os.walk(root, topdown=False):
-        if not filenames and not dirnames:
-            try:
-                os.rmdir(dirpath)
-                removed += 1
-            except OSError:
-                pass
+    dirpaths = [dirpath for dirpath, _dirnames, _filenames in os.walk(root, topdown=False)]
+    for dirpath in tqdm(dirpaths, desc="Removing empty dirs", unit="dir"):
+        try:
+            entries = os.listdir(dirpath)
+        except OSError:
+            continue
+
+        if entries:
+            continue
+
+        try:
+            os.rmdir(dirpath)
+            removed += 1
+        except OSError:
+            pass
     return removed
 
 
-def clean(dataset_root: Path, *, dry_run: bool = False, workers: int = 1) -> None:
+def resolve_dataset_root(dataset_root: Path) -> Path:
+    """Accept either a split root containing ``train/`` or a scene-rooted directory."""
     train_dir = dataset_root / "train"
-    if not train_dir.is_dir():
-        raise SystemExit(f"ERROR: train directory not found: {train_dir}")
+    if train_dir.is_dir():
+        return train_dir
+
+    # Some local Hypersim copies are scene-rooted, e.g. ``data/ai_001_001/...``.
+    if any(dataset_root.glob("ai_*")):
+        return dataset_root
+
+    raise SystemExit(
+        "ERROR: could not find dataset files under "
+        f"{dataset_root} (expected either a train/ directory or ai_* scene folders)"
+    )
+
+
+def clean(dataset_root: Path, *, dry_run: bool = False, workers: int = 1) -> None:
+    train_dir = resolve_dataset_root(dataset_root)
 
     # 1. Discover samples the way the training loader does.
     samples = discover_samples(train_dir)
@@ -198,7 +230,7 @@ def clean(dataset_root: Path, *, dry_run: bool = False, workers: int = 1) -> Non
 
     # 5. Delete.
     deleted = 0
-    for p in sorted(to_delete):
+    for p in tqdm(sorted(to_delete), desc="Deleting files", unit="file"):
         try:
             p.unlink()
             deleted += 1
@@ -226,7 +258,7 @@ def main() -> None:
     parser.add_argument(
         "dataset_dir",
         type=Path,
-        help="Root of the Hypersim dataset (must contain a train/ subdirectory).",
+        help="Root of the Hypersim dataset (either contains train/ or ai_* scene folders).",
     )
     parser.add_argument(
         "--dry-run",

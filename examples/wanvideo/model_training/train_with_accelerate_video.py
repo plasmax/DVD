@@ -1000,57 +1000,73 @@ if __name__ == "__main__":
     )
 
     train_dataloader_list = [build_fn() for _, _, build_fn in active_dataset_builders]
-    # Test set
-    # kitti_vid_test_dataset = KITTI_VID_Dataset(
-    #     data_root=args.kitti_vid_test_data_root,
-    #     max_num_frame=args.test_max_num_frame,
-    #     min_num_frame=args.test_min_num_frame,
-    #     max_sample_stride=args.test_max_sample_stride,
-    #     min_sample_stride=args.test_min_sample_stride,
-    # )
-    # scannet_vid_test_dataset = Scannet_VID_Dataset(
-    #     data_root=args.scannet_vid_test_data_root,
-    #     split_ls=args.scannet_split_ls,
-    #     test=False,
-    #     max_num_frame=args.test_max_num_frame,
-    #     min_num_frame=args.test_min_num_frame,
-    #     max_sample_stride=args.test_max_sample_stride,
-    #     min_sample_stride=args.test_min_sample_stride,
-    # )
-    # nyuv2_test_dataset = NYUv2Dataset(
-    #     data_root=args.nyuv2_test_data_root,
-    #     test=False,
-    # )
-    # kitti_vid_test_dataloader = torch.utils.data.DataLoader(
-    #     kitti_vid_test_dataset,
-    #     shuffle=False,
-    #     batch_size=args.test_batch_size,
-    #     num_workers=2,
-    #     collate_fn=custom_collate_fn,
-    #     pin_memory=True,
-    #     persistent_workers=True,
-    # )
-    # scannet_vid_test_dataloader = torch.utils.data.DataLoader(
-    #     scannet_vid_test_dataset,
-    #     shuffle=False,
-    #     batch_size=args.test_batch_size,
-    #     num_workers=2,
-    #     collate_fn=custom_collate_fn,
-    #     pin_memory=True,
-    #     persistent_workers=True,
-    # )
-    # nyuv2_test_dataloader = torch.utils.data.DataLoader(
-    #     nyuv2_test_dataset,
-    #     shuffle=False,
-    #     batch_size=args.test_batch_size,
-    #     num_workers=2,
-    #     collate_fn=custom_collate_fn,
-    #     pin_memory=True,
-    #     persistent_workers=True,
-    # )
-    kitti_vid_test_dataloader = []
-    scannet_vid_test_dataloader = []
-    nyuv2_test_dataloader = []
+
+    def _maybe_build_eval_loader(name, root_path, dataset_builder):
+        if not root_path or str(root_path).startswith("your_"):
+            accelerator.print(
+                f"Skipping validation dataset `{name}`: root path is unset ({root_path})."
+            )
+            return None
+        if not os.path.exists(root_path):
+            accelerator.print(
+                f"Skipping validation dataset `{name}`: path does not exist ({root_path})."
+            )
+            return None
+        dataset = dataset_builder()
+        accelerator.print(
+            f"Enabled validation dataset `{name}` with {len(dataset)} samples from {root_path}."
+        )
+        return torch.utils.data.DataLoader(
+            dataset,
+            shuffle=False,
+            batch_size=args.test_batch_size,
+            num_workers=2,
+            collate_fn=custom_collate_fn,
+            pin_memory=True,
+            persistent_workers=True,
+        )
+
+    eval_loader_entries = []
+    kitti_vid_test_dataloader = _maybe_build_eval_loader(
+        "kitti",
+        args.kitti_vid_test_data_root,
+        lambda: KITTI_VID_Dataset(
+            data_root=args.kitti_vid_test_data_root,
+            max_num_frame=args.test_max_num_frame,
+            min_num_frame=args.test_min_num_frame,
+            max_sample_stride=args.test_max_sample_stride,
+            min_sample_stride=args.test_min_sample_stride,
+        ),
+    )
+    if kitti_vid_test_dataloader is not None:
+        eval_loader_entries.append(("kitti", kitti_vid_test_dataloader))
+
+    scannet_vid_test_dataloader = _maybe_build_eval_loader(
+        "scannet",
+        args.scannet_vid_test_data_root,
+        lambda: Scannet_VID_Dataset(
+            data_root=args.scannet_vid_test_data_root,
+            split_ls=args.scannet_split_ls,
+            test=False,
+            max_num_frame=args.test_max_num_frame,
+            min_num_frame=args.test_min_num_frame,
+            max_sample_stride=args.test_max_sample_stride,
+            min_sample_stride=args.test_min_sample_stride,
+        ),
+    )
+    if scannet_vid_test_dataloader is not None:
+        eval_loader_entries.append(("scannet", scannet_vid_test_dataloader))
+
+    nyuv2_test_dataloader = _maybe_build_eval_loader(
+        "nyuv2",
+        args.nyuv2_test_data_root,
+        lambda: NYUv2Dataset(
+            data_root=args.nyuv2_test_data_root,
+            test=False,
+        ),
+    )
+    if nyuv2_test_dataloader is not None:
+        eval_loader_entries.append(("nyuv2", nyuv2_test_dataloader))
 
     start_epoch, global_step = 0, 0
     prepared = (
@@ -1059,16 +1075,15 @@ if __name__ == "__main__":
             optimizer,
             scheduler,
             *train_dataloader_list,
-            kitti_vid_test_dataloader,
-            scannet_vid_test_dataloader,
-            nyuv2_test_dataloader,
+            *[loader for _, loader in eval_loader_entries],
         )
     )
     model = prepared[0]
     optimizer = prepared[1]
     scheduler = prepared[2]
-    train_dataloader_list = list(prepared[3:-3])
-    kitti_vid_test_dataloader, scannet_vid_test_dataloader, nyuv2_test_dataloader = prepared[-3:]
+    num_train_dataloaders = len(train_dataloader_list)
+    train_dataloader_list = list(prepared[3:3 + num_train_dataloaders])
+    prepared_eval_loaders = prepared[3 + num_train_dataloaders:]
 
     if args.resume and args.training_state_dir is not None:
 
@@ -1115,9 +1130,8 @@ if __name__ == "__main__":
         model = model.module
 
     test_loader_dict = {
-        # 'kitti': kitti_vid_test_dataloader,
-        # 'scannet': scannet_vid_test_dataloader,
-        # 'nyuv2': nyuv2_test_dataloader
+        name: loader
+        for (name, _), loader in zip(eval_loader_entries, prepared_eval_loaders)
     }
 
     dataset_range = {
