@@ -16,6 +16,7 @@ import argparse
 import os
 import sys
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -69,6 +70,13 @@ class DatasetReport:
         return not self.fatal and self.valid > 0
 
 
+@dataclass
+class ValidationResult:
+    ok: bool
+    error: str | None = None
+    warning: str | None = None
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Validate DVD training datasets.")
     parser.add_argument(
@@ -86,6 +94,12 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=None,
         help="Limit the number of samples/scenes checked per dataset.",
+    )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=min(32, (os.cpu_count() or 1) * 4),
+        help="Number of worker threads for parallel sample validation.",
     )
     return parser.parse_args()
 
@@ -150,7 +164,31 @@ def sanitize_infinigen_depth(depth: np.ndarray) -> np.ndarray:
     return sanitized
 
 
-def validate_hypersim(root: Path, limit: int | None) -> DatasetReport:
+def apply_parallel_checks(
+    items: list[object],
+    report: DatasetReport,
+    worker_count: int,
+    check_fn,
+) -> None:
+    if not items:
+        return
+
+    if worker_count <= 1:
+        results = map(check_fn, items)
+    else:
+        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+            results = executor.map(check_fn, items)
+
+    for result in results:
+        if result.warning:
+            report.warnings.append(result.warning)
+        if result.ok:
+            report.add_valid()
+        else:
+            report.add_error(result.error or "unknown validation error")
+
+
+def validate_hypersim(root: Path, limit: int | None, workers: int) -> DatasetReport:
     report = DatasetReport("hypersim_image")
     split_dir = root / "train"
     if not split_dir.is_dir():
@@ -171,7 +209,8 @@ def validate_hypersim(root: Path, limit: int | None) -> DatasetReport:
         report.fatal.append(f"No Hypersim training samples found under {split_dir}")
         return report
 
-    for img_path, dep_path in samples:
+    def check_sample(sample: tuple[Path, Path]) -> ValidationResult:
+        img_path, dep_path = sample
         try:
             with Image.open(img_path) as image:
                 image.convert("RGB")
@@ -186,15 +225,17 @@ def validate_hypersim(root: Path, limit: int | None) -> DatasetReport:
                 raise ValueError("depth contains NaN or inf after conversion")
             if (depth <= 0).any():
                 raise ValueError("depth contains non-positive values")
-            report.add_valid()
+            return ValidationResult(ok=True)
         except Exception as exc:
-            report.add_error(str(exc))
+            return ValidationResult(ok=False, error=str(exc))
+
+    apply_parallel_checks(samples, report, workers, check_sample)
     if report.valid == 0:
         report.fatal.append("No valid Hypersim samples found.")
     return report
 
 
-def validate_synthhuman(root: Path, limit: int | None) -> DatasetReport:
+def validate_synthhuman(root: Path, limit: int | None, workers: int) -> DatasetReport:
     report = DatasetReport("synthhuman_image")
     if not root.is_dir():
         report.fatal.append(f"Missing SynthHuman root: {root}")
@@ -219,7 +260,8 @@ def validate_synthhuman(root: Path, limit: int | None) -> DatasetReport:
         report.fatal.append(f"No SynthHuman RGB/depth pairs found under {root}")
         return report
 
-    for img_path, dep_path in samples:
+    def check_sample(sample: tuple[Path, Path]) -> ValidationResult:
+        img_path, dep_path = sample
         try:
             with Image.open(img_path) as image:
                 image.convert("RGB")
@@ -230,15 +272,17 @@ def validate_synthhuman(root: Path, limit: int | None) -> DatasetReport:
                 raise ValueError("depth contains NaN or inf")
             if (depth <= 0).any():
                 raise ValueError("depth contains non-positive values")
-            report.add_valid()
+            return ValidationResult(ok=True)
         except Exception as exc:
-            report.add_error(str(exc))
+            return ValidationResult(ok=False, error=str(exc))
+
+    apply_parallel_checks(samples, report, workers, check_sample)
     if report.valid == 0:
         report.fatal.append("No valid SynthHuman samples found.")
     return report
 
 
-def validate_infinigen(root: Path, limit: int | None) -> DatasetReport:
+def validate_infinigen(root: Path, limit: int | None, workers: int) -> DatasetReport:
     report = DatasetReport("infinigen_image")
     if not root.is_dir():
         report.fatal.append(f"Missing Infinigen root: {root}")
@@ -258,8 +302,8 @@ def validate_infinigen(root: Path, limit: int | None) -> DatasetReport:
         report.fatal.append(f"No Infinigen RGB/depth pairs found under {root}")
         return report
 
-    replaced_nonfinite = 0
-    for image_path, depth_path in pairs:
+    def check_sample(sample: tuple[Path, Path]) -> ValidationResult:
+        image_path, depth_path = sample
         try:
             with Image.open(image_path) as image:
                 image.convert("RGB")
@@ -268,13 +312,27 @@ def validate_infinigen(root: Path, limit: int | None) -> DatasetReport:
             depth = np.load(depth_path)
             if depth.ndim != 2:
                 raise ValueError(f"expected HxW depth, got shape {depth.shape}")
+            warning = None
             if not np.isfinite(depth).all():
-                replaced_nonfinite += 1
-            depth = sanitize_infinigen_depth(depth)
-            report.add_valid()
+                warning = (
+                    "sample contained non-finite depth; validation filled it with the farthest finite depth, matching the training loader."
+                )
+            sanitize_infinigen_depth(depth)
+            return ValidationResult(ok=True, warning=warning)
         except Exception as exc:
-            report.add_error(str(exc))
+            return ValidationResult(ok=False, error=str(exc))
+
+    apply_parallel_checks(pairs, report, workers, check_sample)
+    replaced_nonfinite = sum(
+        warning.startswith("sample contained non-finite depth")
+        for warning in report.warnings
+    )
     if replaced_nonfinite:
+        report.warnings = [
+            warning
+            for warning in report.warnings
+            if not warning.startswith("sample contained non-finite depth")
+        ]
         report.warnings.append(
             f"{replaced_nonfinite} checked sample(s) contained non-finite depth; validation filled them with the farthest finite depth, matching the training loader."
         )
@@ -283,7 +341,7 @@ def validate_infinigen(root: Path, limit: int | None) -> DatasetReport:
     return report
 
 
-def validate_tartanair(root: Path, min_num_frame: int, limit: int | None) -> DatasetReport:
+def validate_tartanair(root: Path, min_num_frame: int, limit: int | None, workers: int) -> DatasetReport:
     report = DatasetReport("tartanair_video")
     if not root.is_dir():
         report.fatal.append(f"Missing TartanAir root: {root}")
@@ -303,7 +361,8 @@ def validate_tartanair(root: Path, min_num_frame: int, limit: int | None) -> Dat
         report.fatal.append(f"No TartanAir depth directories found under {root}")
         return report
 
-    for rgb_dir, depth_dir in scenes:
+    def check_scene(scene: tuple[Path, Path]) -> ValidationResult:
+        rgb_dir, depth_dir = scene
         try:
             if not rgb_dir.is_dir():
                 raise FileNotFoundError(f"missing image dir {rgb_dir}")
@@ -323,15 +382,17 @@ def validate_tartanair(root: Path, min_num_frame: int, limit: int | None) -> Dat
             sample_depth = np.load(depth_files[0])
             if not np.isfinite(sample_depth).all():
                 raise ValueError(f"depth contains NaN or inf: {depth_files[0]}")
-            report.add_valid()
+            return ValidationResult(ok=True)
         except Exception as exc:
-            report.add_error(str(exc))
+            return ValidationResult(ok=False, error=str(exc))
+
+    apply_parallel_checks(scenes, report, workers, check_scene)
     if report.valid == 0:
         report.fatal.append("No valid TartanAir scenes found.")
     return report
 
 
-def validate_vkitti_image(root: Path, limit: int | None) -> DatasetReport:
+def validate_vkitti_image(root: Path, limit: int | None, workers: int) -> DatasetReport:
     report = DatasetReport("vkitti_image")
     if not root.is_dir():
         report.fatal.append(f"Missing VKITTI root: {root}")
@@ -363,7 +424,8 @@ def validate_vkitti_image(root: Path, limit: int | None) -> DatasetReport:
         report.fatal.append(f"No VKITTI image samples found under {root}")
         return report
 
-    for image_path, depth_path in pairs:
+    def check_sample(sample: tuple[Path, Path]) -> ValidationResult:
+        image_path, depth_path = sample
         try:
             with Image.open(image_path) as image:
                 image.convert("RGB")
@@ -375,15 +437,17 @@ def validate_vkitti_image(root: Path, limit: int | None) -> DatasetReport:
                 raise ValueError("depth contains NaN or inf")
             if not (depth > 0).any():
                 raise ValueError("depth has no positive values")
-            report.add_valid()
+            return ValidationResult(ok=True)
         except Exception as exc:
-            report.add_error(str(exc))
+            return ValidationResult(ok=False, error=str(exc))
+
+    apply_parallel_checks(pairs, report, workers, check_sample)
     if report.valid == 0:
         report.fatal.append("No valid VKITTI image samples found.")
     return report
 
 
-def validate_vkitti_video(root: Path, min_num_frame: int, limit: int | None) -> DatasetReport:
+def validate_vkitti_video(root: Path, min_num_frame: int, limit: int | None, workers: int) -> DatasetReport:
     report = DatasetReport("vkitti_video")
     if not root.is_dir():
         report.fatal.append(f"Missing VKITTI root: {root}")
@@ -409,7 +473,8 @@ def validate_vkitti_video(root: Path, min_num_frame: int, limit: int | None) -> 
         report.fatal.append(f"No VKITTI video directories found under {root}")
         return report
 
-    for rgb_dir, depth_dir in dirs:
+    def check_scene(scene: tuple[Path, Path]) -> ValidationResult:
+        rgb_dir, depth_dir = scene
         try:
             if not rgb_dir.is_dir():
                 raise FileNotFoundError(f"missing rgb dir {rgb_dir}")
@@ -435,9 +500,11 @@ def validate_vkitti_video(root: Path, min_num_frame: int, limit: int | None) -> 
             sample_depth = sample_depth / 100.0
             if not np.isfinite(sample_depth).all():
                 raise ValueError(f"depth contains NaN or inf: {depth_files[0]}")
-            report.add_valid()
+            return ValidationResult(ok=True)
         except Exception as exc:
-            report.add_error(str(exc))
+            return ValidationResult(ok=False, error=str(exc))
+
+    apply_parallel_checks(dirs, report, workers, check_scene)
     if report.valid == 0:
         report.fatal.append("No valid VKITTI video scenes found.")
     return report
@@ -458,6 +525,9 @@ def summarize(report: DatasetReport) -> str:
 
 def main() -> int:
     args = parse_args()
+    if args.workers < 1:
+        print("--workers must be at least 1", file=sys.stderr)
+        return 2
     repo_root = Path(__file__).resolve().parents[1]
     cfg = OmegaConf.load(repo_root / args.config)
     probs = list(cfg.get("prob", []))
@@ -473,6 +543,7 @@ def main() -> int:
             validate_hypersim(
                 resolve_repo_path(repo_root, cfg.train_data_dir_hypersim),
                 args.limit,
+                args.workers,
             )
         )
     if "synthhuman_image" in active:
@@ -480,6 +551,7 @@ def main() -> int:
             validate_synthhuman(
                 resolve_repo_path(repo_root, cfg.train_data_dir_synthhuman),
                 args.limit,
+                args.workers,
             )
         )
     if "infinigen_image" in active:
@@ -487,6 +559,7 @@ def main() -> int:
             validate_infinigen(
                 resolve_repo_path(repo_root, cfg.train_data_dir_infinigen),
                 args.limit,
+                args.workers,
             )
         )
     if "vkitti_image" in active:
@@ -494,6 +567,7 @@ def main() -> int:
             validate_vkitti_image(
                 resolve_repo_path(repo_root, cfg.train_data_dir_vkitti),
                 args.limit,
+                args.workers,
             )
         )
     if "tartanair_video" in active:
@@ -502,6 +576,7 @@ def main() -> int:
                 resolve_repo_path(repo_root, cfg.train_data_dir_ttr_vid),
                 int(cfg.min_num_frame),
                 args.limit,
+                args.workers,
             )
         )
     if "vkitti_video" in active:
@@ -510,6 +585,7 @@ def main() -> int:
                 resolve_repo_path(repo_root, cfg.train_data_dir_vkitti_vid),
                 int(cfg.min_num_frame),
                 args.limit,
+                args.workers,
             )
         )
 
