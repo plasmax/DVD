@@ -4,6 +4,17 @@ import torch
 import torch.nn as nn
 
 
+def sinusoidal_embedding_1d(dim, position):
+    sinusoid = torch.outer(
+        position.type(torch.float64),
+        torch.pow(10000,
+                  -torch.arange(dim//2, dtype=torch.float64, device=position.device).div(dim//2)
+        ),
+    )
+    x = torch.cat([torch.cos(sinusoid), torch.sin(sinusoid)], dim=1)
+    return x.to(position.dtype) 
+
+
 class VariationalAutoencoder(nn.Module):
     # Adapted from WanVideoVAE
     def __init__(self):
@@ -20,6 +31,11 @@ class DiffusionTransformer(nn.Module):
     # Adapted from WanModel
     def __init__(self):
         super(DiffusionTransformer, self).__init__()
+        self.timestep = # TODO: can this be a fixed value?
+        self.sinusoidal_embedding = sinusoidal_embedding_1d(self.freq_dim, self.timestep)
+
+    def time_embedding(self, t):
+        return t
 
     def forward(self, x):
         return x
@@ -41,8 +57,8 @@ class DeterministicVideoDepth(nn.Module):
 
     def forward(self, x):
 
-        x = self.vae.encode(x)
-        x = self.dit(x)
+        latents = self.vae.encode(x)
+        x = self.dit(latents)
         x = self.vae.decode(x)
 
         return x
