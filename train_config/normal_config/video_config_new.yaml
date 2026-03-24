@@ -25,7 +25,7 @@ global_step: 0
 
 # train:
 num_epochs: 1000000
-gradient_accumulation_steps: 32
+gradient_accumulation_steps: 16
 validate_step: 50
 init_validate: false
 
