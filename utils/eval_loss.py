@@ -60,13 +60,16 @@ def build_dataloader(args, dataset_name, batch_size):
         from examples.dataset import TartanAir_VID_Dataset
 
         dataset = TartanAir_VID_Dataset(
-            data_root=args.train_data_dir_ttr_vid,
+            data_dir=args.train_data_dir_ttr_vid,
+            random_flip=False,
+            norm_type=args.norm_type,
+            resolution=args.resolution_hypersim,
+            truncnorm_min=args.truncnorm_min,
             max_num_frame=args.max_num_frame,
             min_num_frame=args.min_num_frame,
             max_sample_stride=args.max_sample_stride,
             min_sample_stride=args.min_sample_stride,
-            norm_type=args.norm_type,
-            truncnorm_min=args.truncnorm_min,
+            train_ratio=args.train_ratio,
         )
     else:
         raise ValueError(f"Unknown dataset: {dataset_name}. Use 'hypersim' or 'tartanair'.")
