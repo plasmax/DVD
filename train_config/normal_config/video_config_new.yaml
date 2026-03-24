@@ -51,7 +51,7 @@ train_ratio: 1
 # Prob order: [hypersim_image, synthhuman_image, infinigen_image, vkitti_image, tartanair_video, vkitti_video]
 # With image batch_size reduced from 8 to 4, keep image/video exposure close to the
 # original DVD training mix while adding SynthHuman as another image source.
-prob: [18, 0, 0, 0, 40, 0]
+prob: [9, 0, 0, 0, 40, 0]
 batch_size: 8
 
 # Image
