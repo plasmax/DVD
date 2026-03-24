@@ -44,7 +44,7 @@ from examples.wanvideo.model_training.train_with_accelerate_video import (
 def build_dataloader(args, dataset_name, batch_size):
     """Build a dataloader for the requested dataset."""
     if dataset_name == "hypersim":
-        from examples.dataset.training_dataset.hypersim_dataset import HypersimDataset
+        from examples.dataset import HypersimDataset
 
         dataset = HypersimDataset(
             data_dir=args.train_data_dir_hypersim,
@@ -57,9 +57,7 @@ def build_dataloader(args, dataset_name, batch_size):
             train_ratio=args.train_ratio,
         )
     elif dataset_name == "tartanair":
-        from examples.dataset.training_dataset.tartanair_video_dataset import (
-            TartanAir_VID_Dataset,
-        )
+        from examples.dataset import TartanAir_VID_Dataset
 
         dataset = TartanAir_VID_Dataset(
             data_root=args.train_data_dir_ttr_vid,
