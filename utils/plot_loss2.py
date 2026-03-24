@@ -6,6 +6,7 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib.ticker import LogFormatterSciNotation, LogLocator
 
 
 def positive_int(value):
@@ -124,8 +125,14 @@ def main():
     if smoothing_label:
         title += f" ({smoothing_label})"
     plt.title(title)
+    ax = plt.gca()
     if args.log:
-        plt.yscale("log")
+        ax.set_yscale("log")
+        # Label intermediate log ticks so small changes are easier to read.
+        ax.yaxis.set_major_locator(LogLocator(base=10, subs=(1.0,)))
+        ax.yaxis.set_minor_locator(LogLocator(base=10, subs=range(2, 10)))
+        ax.yaxis.set_major_formatter(LogFormatterSciNotation(base=10, labelOnlyBase=False))
+        ax.yaxis.set_minor_formatter(LogFormatterSciNotation(base=10, labelOnlyBase=False))
     plt.grid(True, alpha=0.3)
     plt.legend()
     plt.tight_layout()
