@@ -1,12 +1,13 @@
 import argparse
 import csv
+import math
 from pathlib import Path
 
 import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-from matplotlib.ticker import LogFormatterSciNotation, LogLocator
+from matplotlib.ticker import FuncFormatter
 
 
 def positive_int(value):
@@ -107,6 +108,36 @@ def maybe_smooth(values, args):
     return list(values), None
 
 
+def decimal_log_label(value, _pos):
+    if value >= 1:
+        return f"{value:.2f}".rstrip("0").rstrip(".")
+    if value >= 0.1:
+        return f"{value:.3f}".rstrip("0").rstrip(".")
+    return f"{value:.4g}"
+
+
+def log_ticks_for_range(values):
+    positive_values = [value for value in values if value > 0]
+    if not positive_values:
+        raise ValueError("Log scale requires positive loss values")
+
+    min_exp = math.floor(math.log10(min(positive_values)))
+    max_exp = math.ceil(math.log10(max(positive_values)))
+
+    ticks = []
+    for exponent in range(min_exp, max_exp + 1):
+        base = 10**exponent
+        for multiple in range(1, 10):
+            tick = multiple * base
+            if min(positive_values) <= tick <= max(positive_values):
+                ticks.append(tick)
+
+    if not ticks:
+        ticks = [min(positive_values), max(positive_values)]
+
+    return sorted(set(ticks))
+
+
 def main():
     args = parse_args()
     csv_path = args.csv_path
@@ -128,11 +159,9 @@ def main():
     ax = plt.gca()
     if args.log:
         ax.set_yscale("log")
-        # Label intermediate log ticks so small changes are easier to read.
-        ax.yaxis.set_major_locator(LogLocator(base=10, subs=(1.0,)))
-        ax.yaxis.set_minor_locator(LogLocator(base=10, subs=range(2, 10)))
-        ax.yaxis.set_major_formatter(LogFormatterSciNotation(base=10, labelOnlyBase=False))
-        ax.yaxis.set_minor_formatter(LogFormatterSciNotation(base=10, labelOnlyBase=False))
+        y_ticks = log_ticks_for_range(depth_losses + grad_losses)
+        ax.set_yticks(y_ticks)
+        ax.yaxis.set_major_formatter(FuncFormatter(decimal_log_label))
     plt.grid(True, alpha=0.3)
     plt.legend()
     plt.tight_layout()
