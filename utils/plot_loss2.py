@@ -17,6 +17,11 @@ def parse_args():
         type=Path,
         help="Output image path. Defaults to <csv_dir>/loss_plot.png",
     )
+    parser.add_argument(
+        "--log",
+        action="store_true",
+        help="Use a logarithmic scale for the y-axis",
+    )
     return parser.parse_args()
 
 
@@ -62,6 +67,8 @@ def main():
     plt.xlabel("Global Step")
     plt.ylabel("Loss")
     plt.title("Training Loss")
+    if args.log:
+        plt.yscale("log")
     plt.grid(True, alpha=0.3)
     plt.legend()
     plt.tight_layout()
