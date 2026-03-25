@@ -31,7 +31,8 @@ class DiffusionTransformer(nn.Module):
     # Adapted from WanModel
     def __init__(self):
         super(DiffusionTransformer, self).__init__()
-        self.timestep = # TODO: can this be a fixed value?
+        self.timestep = torch.tensor([500.0])
+        self.freq_dim = 256
         self.sinusoidal_embedding = sinusoidal_embedding_1d(self.freq_dim, self.timestep)
 
     def time_embedding(self, t):
@@ -47,7 +48,6 @@ class DeterministicVideoDepth(nn.Module):
         super(DeterministicVideoDepth, self).__init__()
         self.vae = VariationalAutoencoder()
         self.dit = DiffusionTransformer()
-        # Q: does it need the scheduler?
 
     @classmethod
     def from_pretrained(cls):
