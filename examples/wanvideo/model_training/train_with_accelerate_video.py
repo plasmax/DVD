@@ -1125,7 +1125,9 @@ if __name__ == "__main__":
                 pg['lr'] = args.learning_rate
 
         else:
-            unwrapped_model = accelerator.unwrap_model(model)
+            unwrapped_model = model
+            while hasattr(unwrapped_model, "module"):
+                unwrapped_model = unwrapped_model.module
             ckpt_path = os.path.join(
                 args.training_state_dir, "model.safetensors")
             state_dict = load_file(ckpt_path, device="cpu")
