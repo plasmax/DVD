@@ -27,7 +27,7 @@ global_step: 0
 num_epochs: 1000000
 gradient_accumulation_steps: 16
 validate_step: 300
-init_validate: false
+init_validate: true
 
 # Hyperparam:
 clip_grad_norm: true
@@ -91,7 +91,7 @@ scannet_vid_test_data_root: 'your_scannet_dir'
 scannet_split_ls: 'configs/scannetv1_test.txt'
 nyuv2_test_data_root: 'your_nyuv2_dir'
 infinigen_test_data_root: "../datasets_network/infinigen"
-infinigen_test_manifest: null
+infinigen_test_manifest: "configs/infinigen_val.txt"
 infinigen_test_dataset_type: "video"
 
 # Unique setting
