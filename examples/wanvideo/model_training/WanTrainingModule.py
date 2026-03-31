@@ -268,7 +268,7 @@ class Validation():
             if 'valid_mask_raw' in batch.keys():
                 valid_mask = batch['valid_mask_raw']
             else:
-                valid_mask = batch.get('eval_mask', torch.ones(rgb.shape))
+                valid_mask = batch.get('eval_mask', torch.ones(rgb.shape, device=rgb.device))
                 _range_mask = torch.logical_and((depth > dataset_min), (
                     depth < dataset_max)).bool()
                 valid_mask = torch.logical_and(valid_mask, _range_mask)
