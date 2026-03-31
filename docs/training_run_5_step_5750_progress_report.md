@@ -159,6 +159,18 @@ If validation worsens while training loss improves:
 - stop training
 - use the best earlier checkpoint
 
+## Comparison with DVD Authors' Checkpoint
+
+Using `utils/eval_loss.py` with `--dataset hypersim --num_batches 20`, both checkpoints were evaluated under identical conditions (LoRA merged, model in eval mode):
+
+| Checkpoint | depth_loss | grad_loss | total_loss |
+|---|---|---|---|
+| DVD authors (`ckpt/`) | 0.016046 | 0.053455 | 0.069501 |
+| Ours (step 5753) | 0.017746 | 0.054712 | 0.072458 |
+| Gap | +10.6% | +2.4% | +4.3% |
+
+Our checkpoint is within ~4% of the authors' total loss, trained entirely on commercially friendly data. The remaining gap is concentrated in `depth_loss`, which is still the most actively improving metric at this stage of training. `grad_loss` is nearly matched, suggesting the model has already learned spatial gradient structure well.
+
 ## Bottom Line
 
 This run is going well.
