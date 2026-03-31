@@ -109,6 +109,10 @@ def save_loss_dashboard(df, loss_cols, output_dir, dpi):
     axes[1, 0].set_title("Loss Tradeoff Over Time")
     axes[1, 0].set_xlabel("Depth Loss")
     axes[1, 0].set_ylabel("Grad Loss")
+    # Losses stay positive, so log axes make the late-training cluster readable
+    # instead of being compressed by the large early-run values.
+    axes[1, 0].set_xscale("log")
+    axes[1, 0].set_yscale("log")
     axes[1, 0].grid(alpha=0.3)
     cbar = fig.colorbar(scatter, ax=axes[1, 0])
     cbar.set_label("Global Step")
