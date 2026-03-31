@@ -17,7 +17,7 @@ grad_co: 0.5
 use_latent_flow: true
 
 # Load and save
-resume: true
+resume: false
 training_state_dir: "saves/v005/checkpoint-step-5753"
 load_optimizer: false
 output_path: "saves/v005"

@@ -17,10 +17,10 @@ grad_co: 0.5
 use_latent_flow: true
 
 # Load and save
-resume: false
-training_state_dir: "saves"
-load_optimizer: false
-output_path: "saves"
+resume: true
+training_state_dir: "saves/v005"
+load_optimizer: true
+output_path: "saves/v005"
 global_step: 0
 
 # train:
