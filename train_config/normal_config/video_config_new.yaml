@@ -92,6 +92,7 @@ scannet_split_ls: 'configs/scannetv1_test.txt'
 nyuv2_test_data_root: 'your_nyuv2_dir'
 infinigen_test_data_root: "../datasets_network/infinigen"
 infinigen_test_manifest: null
+infinigen_test_dataset_type: "video"
 
 # Unique setting
 scheduler_training_weight_type: "equal" # late, equal, default

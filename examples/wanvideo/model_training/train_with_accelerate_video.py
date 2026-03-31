@@ -208,6 +208,29 @@ def _infinigen_sample_in_manifest(image_path, depth_path, data_root, manifest_en
     )
 
 
+def _resolve_infinigen_depth_path(image_path):
+    depth_name = image_path.name.replace("Image", "Depth", 1).rsplit(".", 1)[0] + ".npy"
+    if "/Image/" in str(image_path):
+        depth_path = Path(str(image_path).replace("/Image/", "/Depth/")).with_name(depth_name)
+    else:
+        depth_path = image_path.with_name(depth_name)
+    if depth_path.exists():
+        return depth_path
+    return None
+
+
+def _infer_infinigen_sequence_key(image_path, data_root):
+    rel_parts = image_path.relative_to(data_root).parts
+    if "Image" in rel_parts:
+        image_idx = rel_parts.index("Image")
+        if image_idx > 0:
+            return PurePosixPath(*rel_parts[:image_idx]).as_posix()
+        return "Image"
+
+    parent = image_path.parent.relative_to(data_root).as_posix()
+    return "." if parent == "." else parent
+
+
 class SynthHumanDataset(Dataset):
     def __init__(
         self,
@@ -315,6 +338,7 @@ class SynthHumanDataset(Dataset):
                 "sample_idx": torch.tensor(idx),
                 "images": image.unsqueeze(0),
                 "disparity": depth.unsqueeze(0),
+                "depth_raw_linear": raw_depth.unsqueeze(0),
                 "depth": raw_depth.unsqueeze(0),
                 "normal_values": normal,
                 "image_path": img_path,
@@ -442,6 +466,7 @@ class InfinigenDataset(Dataset):
                 "sample_idx": torch.tensor(idx),
                 "images": image.unsqueeze(0),
                 "disparity": depth.unsqueeze(0),
+                "depth_raw_linear": raw_depth.unsqueeze(0),
                 "depth": raw_depth.unsqueeze(0),
                 "normal_values": normal,
                 "image_path": img_path,
@@ -452,6 +477,204 @@ class InfinigenDataset(Dataset):
             dep_path = self.data_list[idx][1] if self.data_list else "unknown"
             self.invalid_indices.add(idx)
             self._report_invalid_sample(idx, str(exc), img_path, dep_path)
+            return self.__getitem__(self._next_valid_index(idx))
+
+
+class InfinigenVideoDataset(Dataset):
+    def __init__(
+        self,
+        data_dir,
+        random_flip,
+        norm_type,
+        resolution=(480, 640),
+        truncnorm_min=0.02,
+        max_num_frame=None,
+        min_num_frame=None,
+        max_sample_stride=None,
+        min_sample_stride=None,
+        split_manifest=None,
+        deterministic_sampling=False,
+    ):
+        self.data_dir = data_dir
+        self.data_list = []
+        self.invalid_indices = set()
+        self.reported_invalid_indices = set()
+        self.deterministic_sampling = deterministic_sampling
+        self.max_num_frame = max_num_frame
+        self.min_num_frame = min_num_frame
+        self.max_sample_stride = max_sample_stride
+        self.min_sample_stride = min_sample_stride
+        self.num_frames = list(range(min_num_frame, max_num_frame + 1))
+        self.strides = list(range(min_sample_stride, max_sample_stride + 1))
+        valid_frame_counts = [frame_count for frame_count in self.num_frames if frame_count % 4 == 1]
+        if not valid_frame_counts:
+            raise ValueError(
+                "InfinigenVideoDataset requires at least one frame count where num_frames % 4 == 1."
+            )
+
+        data_root = Path(data_dir)
+        manifest_entries = _load_split_manifest(split_manifest)
+        total_pairs = 0
+        sequence_map = {}
+
+        for image_path in sorted(data_root.rglob("Image*.png")):
+            depth_path = _resolve_infinigen_depth_path(image_path)
+            if depth_path is None:
+                continue
+            total_pairs += 1
+            if manifest_entries is not None and not _infinigen_sample_in_manifest(
+                image_path=image_path,
+                depth_path=depth_path,
+                data_root=data_root,
+                manifest_entries=manifest_entries,
+            ):
+                continue
+
+            sequence_key = _infer_infinigen_sequence_key(image_path, data_root)
+            record = sequence_map.setdefault(
+                sequence_key,
+                {
+                    "sequence_name": sequence_key,
+                    "img_path_list": [],
+                    "depth_path_list": [],
+                },
+            )
+            record["img_path_list"].append(str(image_path))
+            record["depth_path_list"].append(str(depth_path))
+
+        min_required_frames = min(valid_frame_counts)
+        self.data_list = [
+            record
+            for _, record in sorted(sequence_map.items())
+            if len(record["img_path_list"]) >= min_required_frames
+        ]
+
+        if not self.data_list:
+            raise RuntimeError(
+                f"No Infinigen video sequences with at least {min_required_frames} frames found under {data_dir}"
+            )
+
+        if manifest_entries is not None:
+            kept_pairs = sum(len(record["img_path_list"]) for record in self.data_list)
+            print(
+                f"Infinigen video manifest {split_manifest} kept "
+                f"{kept_pairs} of {total_pairs} RGB/depth pairs across {len(self.data_list)} sequences."
+            )
+        else:
+            print(
+                f"InfinigenVideoDataset discovered {len(self.data_list)} sequences under {data_dir}."
+            )
+
+        new_h, new_w = resolution
+        self.new_h = new_h
+        self.new_w = new_w
+        self.transform = HypersimImageDepthNormalTransform(
+            (new_h, new_w), random_flip, norm_type, truncnorm_min, False
+        )
+
+    def __len__(self):
+        return len(self.data_list)
+
+    def _report_invalid_sample(self, idx, reason, sequence_name):
+        if idx in self.reported_invalid_indices:
+            return
+        self.reported_invalid_indices.add(idx)
+        print(
+            f"Skipping invalid Infinigen video sample at index {idx}: {reason}. "
+            f"sequence={sequence_name}"
+        )
+
+    def _next_valid_index(self, idx):
+        if len(self.invalid_indices) >= len(self.data_list):
+            raise RuntimeError("All Infinigen video sequences are invalid.")
+        next_idx = (idx + 1) % len(self.data_list)
+        while next_idx in self.invalid_indices:
+            next_idx = (next_idx + 1) % len(self.data_list)
+        return next_idx
+
+    def _select_clip_indices(self, total_frames):
+        valid_choices = []
+        for stride in self.strides:
+            for num_frames in self.num_frames:
+                if num_frames % 4 != 1:
+                    continue
+                total_frames_required = stride * (num_frames - 1) + 1
+                if total_frames_required <= total_frames:
+                    valid_choices.append((num_frames, stride, total_frames_required))
+
+        if not valid_choices:
+            raise ValueError(
+                f"Unable to sample a valid clip from {total_frames} frames "
+                f"with num_frame range {self.min_num_frame}-{self.max_num_frame} "
+                f"and stride range {self.min_sample_stride}-{self.max_sample_stride}."
+            )
+
+        if self.deterministic_sampling:
+            valid_choices.sort(key=lambda item: (-item[0], item[1]))
+            num_frames, stride, total_frames_required = valid_choices[0]
+            start_idx = max(0, (total_frames - total_frames_required) // 2)
+        else:
+            num_frames, stride, total_frames_required = random.choice(valid_choices)
+            start_idx = random.randint(0, total_frames - total_frames_required)
+
+        end_idx = start_idx + total_frames_required
+        return list(range(start_idx, end_idx, stride))
+
+    def __getitem__(self, idx):
+        idx = idx % len(self.data_list)
+        if idx in self.invalid_indices:
+            return self.__getitem__(self._next_valid_index(idx))
+
+        try:
+            sample = self.data_list[idx]
+            sequence_name = sample["sequence_name"]
+            img_path_list = sample["img_path_list"]
+            depth_path_list = sample["depth_path_list"]
+            assert len(img_path_list) == len(depth_path_list)
+
+            clip_indices = self._select_clip_indices(len(img_path_list))
+            sampled_img_paths = [img_path_list[i] for i in clip_indices]
+            sampled_depth_paths = [depth_path_list[i] for i in clip_indices]
+
+            image_list = []
+            disparity_list = []
+            raw_depth_list = []
+            for img_path, dep_path in zip(sampled_img_paths, sampled_depth_paths):
+                image = Image.open(img_path).convert("RGB")
+                depth = np.load(dep_path)
+                if depth.ndim != 2:
+                    raise ValueError(f"expected HxW depth, got shape {depth.shape}")
+                depth = sanitize_infinigen_depth(depth)
+
+                raw_depth = torch.from_numpy(depth).unsqueeze(0).unsqueeze(0)
+                raw_depth = F.interpolate(
+                    raw_depth, size=(self.new_h, self.new_w), mode="nearest"
+                ).squeeze()
+                raw_depth = torch.clamp(raw_depth, 1e-3, 65).repeat(3, 1, 1)
+
+                image, disparity, _ = self.transform(image, depth, None)
+                if torch.isnan(image).any() or torch.isinf(image).any():
+                    raise ValueError("image is nan or inf after transform")
+                if torch.isnan(disparity).any() or torch.isinf(disparity).any():
+                    raise ValueError("depth is nan or inf after transform")
+
+                image_list.append(image)
+                disparity_list.append(disparity)
+                raw_depth_list.append(raw_depth)
+
+            return {
+                "sample_idx": torch.tensor(idx),
+                "images": torch.stack(image_list),
+                "disparity": torch.stack(disparity_list),
+                "depth_raw_linear": torch.stack(raw_depth_list),
+                "image_path": sampled_img_paths[0],
+                "depth_path": sampled_depth_paths[0],
+                "scene_name": sequence_name,
+            }
+        except Exception as exc:
+            sequence_name = self.data_list[idx]["sequence_name"] if self.data_list else "unknown"
+            self.invalid_indices.add(idx)
+            self._report_invalid_sample(idx, str(exc), sequence_name)
             return self.__getitem__(self._next_valid_index(idx))
 
 
@@ -1166,17 +1389,41 @@ if __name__ == "__main__":
     if nyuv2_test_dataloader is not None:
         eval_loader_entries.append(("nyuv2", nyuv2_test_dataloader))
 
-    infinigen_test_dataloader = _maybe_build_eval_loader(
-        "infinigen",
-        args.get("infinigen_test_data_root"),
-        lambda: InfinigenDataset(
+    infinigen_eval_dataset_type = str(
+        args.get("infinigen_test_dataset_type", "image")
+    ).lower()
+    if infinigen_eval_dataset_type == "video":
+        infinigen_eval_builder = lambda: InfinigenVideoDataset(
+            data_dir=args.infinigen_test_data_root,
+            random_flip=False,
+            norm_type=args.norm_type,
+            truncnorm_min=args.truncnorm_min,
+            resolution=args.resolution_hypersim,
+            max_num_frame=args.test_max_num_frame,
+            min_num_frame=args.test_min_num_frame,
+            max_sample_stride=args.test_max_sample_stride,
+            min_sample_stride=args.test_min_sample_stride,
+            split_manifest=args.get("infinigen_test_manifest"),
+            deterministic_sampling=True,
+        )
+    elif infinigen_eval_dataset_type == "image":
+        infinigen_eval_builder = lambda: InfinigenDataset(
             data_dir=args.infinigen_test_data_root,
             random_flip=False,
             norm_type=args.norm_type,
             truncnorm_min=args.truncnorm_min,
             resolution=args.resolution_hypersim,
             split_manifest=args.get("infinigen_test_manifest"),
-        ),
+        )
+    else:
+        raise ValueError(
+            "Expected `infinigen_test_dataset_type` to be either `image` or `video`."
+        )
+
+    infinigen_test_dataloader = _maybe_build_eval_loader(
+        "infinigen",
+        args.get("infinigen_test_data_root"),
+        infinigen_eval_builder,
     )
     if infinigen_test_dataloader is not None:
         eval_loader_entries.append(("infinigen", infinigen_test_dataloader))
