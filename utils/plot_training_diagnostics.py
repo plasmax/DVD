@@ -7,9 +7,22 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from matplotlib.ticker import FuncFormatter
 
 
 DEFAULT_WINDOWS = (25, 50, 100)
+
+
+def decimal_log_label(value, _pos):
+    if value <= 0:
+        return ""
+    if value >= 1:
+        return f"{value:.2f}".rstrip("0").rstrip(".")
+    if value >= 0.1:
+        return f"{value:.3f}".rstrip("0").rstrip(".")
+    if value >= 0.01:
+        return f"{value:.4f}".rstrip("0").rstrip(".")
+    return f"{value:.5f}".rstrip("0").rstrip(".")
 
 
 def parse_args():
@@ -113,6 +126,8 @@ def save_loss_dashboard(df, loss_cols, output_dir, dpi):
     # instead of being compressed by the large early-run values.
     axes[1, 0].set_xscale("log")
     axes[1, 0].set_yscale("log")
+    axes[1, 0].xaxis.set_major_formatter(FuncFormatter(decimal_log_label))
+    axes[1, 0].yaxis.set_major_formatter(FuncFormatter(decimal_log_label))
     axes[1, 0].grid(alpha=0.3)
     cbar = fig.colorbar(scatter, ax=axes[1, 0])
     cbar.set_label("Global Step")
