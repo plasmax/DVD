@@ -7,7 +7,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from matplotlib.ticker import FuncFormatter
+from matplotlib.ticker import FixedLocator, FuncFormatter, NullFormatter
 
 
 DEFAULT_WINDOWS = (25, 50, 100)
@@ -23,6 +23,28 @@ def decimal_log_label(value, _pos):
     if value >= 0.01:
         return f"{value:.4f}".rstrip("0").rstrip(".")
     return f"{value:.5f}".rstrip("0").rstrip(".")
+
+
+def log_ticks_for_values(values):
+    positive_values = [float(v) for v in values if v > 0]
+    if not positive_values:
+        return []
+
+    min_exp = int(np.floor(np.log10(min(positive_values))))
+    max_exp = int(np.ceil(np.log10(max(positive_values))))
+
+    ticks = []
+    for exponent in range(min_exp, max_exp + 1):
+        base = 10 ** exponent
+        for multiple in (1, 2, 5):
+            tick = multiple * base
+            if min(positive_values) <= tick <= max(positive_values):
+                ticks.append(tick)
+
+    if not ticks:
+        ticks = [min(positive_values), max(positive_values)]
+
+    return sorted(set(ticks))
 
 
 def parse_args():
@@ -126,11 +148,16 @@ def save_loss_dashboard(df, loss_cols, output_dir, dpi):
     # instead of being compressed by the large early-run values.
     axes[1, 0].set_xscale("log")
     axes[1, 0].set_yscale("log")
+    x_ticks = log_ticks_for_values(df["depth_loss"])
+    y_ticks = log_ticks_for_values(df["grad_loss"])
+    if x_ticks:
+        axes[1, 0].xaxis.set_major_locator(FixedLocator(x_ticks))
+    if y_ticks:
+        axes[1, 0].yaxis.set_major_locator(FixedLocator(y_ticks))
     axes[1, 0].xaxis.set_major_formatter(FuncFormatter(decimal_log_label))
     axes[1, 0].yaxis.set_major_formatter(FuncFormatter(decimal_log_label))
-    axes[1, 0].xaxis.set_minor_formatter(FuncFormatter(decimal_log_label))
-    axes[1, 0].yaxis.set_minor_formatter(FuncFormatter(decimal_log_label))
-    axes[1, 0].tick_params(axis="y", which="minor", labelleft=False)
+    axes[1, 0].xaxis.set_minor_formatter(NullFormatter())
+    axes[1, 0].yaxis.set_minor_formatter(NullFormatter())
     axes[1, 0].grid(alpha=0.3)
     cbar = fig.colorbar(scatter, ax=axes[1, 0])
     cbar.set_label("Global Step")
