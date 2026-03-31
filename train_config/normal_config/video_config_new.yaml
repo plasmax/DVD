@@ -88,6 +88,7 @@ kitti_vid_test_data_root: "your_kitti_depth_dir"
 scannet_vid_test_data_root: 'your_scannet_dir'
 scannet_split_ls: 'configs/scannetv1_test.txt'
 nyuv2_test_data_root: 'your_nyuv2_dir'
+infinigen_test_data_root: "../datasets_network/infinigen"
 
 # Unique setting
 scheduler_training_weight_type: "equal" # late, equal, default

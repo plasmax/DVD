@@ -1068,6 +1068,20 @@ if __name__ == "__main__":
     if nyuv2_test_dataloader is not None:
         eval_loader_entries.append(("nyuv2", nyuv2_test_dataloader))
 
+    infinigen_test_dataloader = _maybe_build_eval_loader(
+        "infinigen",
+        args.get("infinigen_test_data_root"),
+        lambda: InfinigenDataset(
+            data_dir=args.infinigen_test_data_root,
+            random_flip=False,
+            norm_type=args.norm_type,
+            truncnorm_min=args.truncnorm_min,
+            resolution=args.resolution_hypersim,
+        ),
+    )
+    if infinigen_test_dataloader is not None:
+        eval_loader_entries.append(("infinigen", infinigen_test_dataloader))
+
     start_epoch, global_step = 0, 0
     prepared = (
         accelerator.prepare(
@@ -1138,6 +1152,7 @@ if __name__ == "__main__":
         'kitti': [1e-5, 80],
         'scannet': [1e-3, 10],
         'nyuv2': [1e-3, 10],
+        'infinigen': [1e-3, 65],
     }
 
     merged_args = OmegaConf.merge(args, {"prob": active_prob})
