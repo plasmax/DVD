@@ -201,6 +201,7 @@ class Validation():
     ):
         self.validate_time += 1
         rank = accelerator.process_index
+        max_validation_batches = args.get("max_validation_batches")
 
         print(
             f"GPU {rank} starting validation # {self.validate_time} at step {global_step}...")
@@ -310,7 +311,7 @@ class Validation():
                 os.makedirs(os.path.join(save_dir, _dir), exist_ok=True)
 
             for idx, batch in enumerate(tqdm(test_dataloader)):
-                if idx > 1:
+                if max_validation_batches is not None and idx >= max_validation_batches:
                     break
                 with torch.no_grad():
                     input_rgb, input_depth, valid_mask, sample_idx = get_data(

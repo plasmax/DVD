@@ -7,7 +7,7 @@ import sys
 import time
 from datetime import timedelta
 from itertools import cycle
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import csv
 import numpy as np
@@ -126,6 +126,86 @@ def sanitize_infinigen_depth(depth):
     # finite depth so the existing normalization path can run without masks.
     sanitized[~finite_positive] = np.max(sanitized[finite_positive])
     return sanitized
+
+
+def _normalize_manifest_entry(entry):
+    normalized = entry.strip().replace("\\", "/").strip("/")
+    if normalized in ("", "."):
+        return None
+    return normalized
+
+
+def _load_split_manifest(manifest_path):
+    if manifest_path is None:
+        return None
+
+    manifest_path = str(manifest_path).strip()
+    if not manifest_path:
+        return None
+    if not os.path.exists(manifest_path):
+        raise FileNotFoundError(
+            f"Split manifest does not exist: {manifest_path}"
+        )
+
+    entries = set()
+    with open(manifest_path, "r", encoding="utf-8") as handle:
+        for line in handle:
+            line = line.split("#", 1)[0]
+            normalized = _normalize_manifest_entry(line)
+            if normalized is not None:
+                entries.add(normalized)
+
+    if not entries:
+        raise ValueError(f"Split manifest is empty: {manifest_path}")
+
+    return entries
+
+
+def _relative_posix(path, root):
+    relative = path.relative_to(root).as_posix()
+    return "" if relative == "." else relative
+
+
+def _candidate_matches_manifest(candidate, manifest_entries):
+    for entry in manifest_entries:
+        if candidate == entry or candidate.startswith(entry + "/"):
+            return True
+    return False
+
+
+def _infinigen_manifest_candidates(image_path, depth_path, data_root):
+    candidates = {
+        _relative_posix(image_path, data_root),
+        _relative_posix(depth_path, data_root),
+        _relative_posix(image_path.parent, data_root),
+        _relative_posix(depth_path.parent, data_root),
+    }
+
+    for rel_parts, marker in (
+        (image_path.relative_to(data_root).parts, "Image"),
+        (depth_path.relative_to(data_root).parts, "Depth"),
+    ):
+        if marker not in rel_parts:
+            continue
+        marker_idx = rel_parts.index(marker)
+        if marker_idx > 0:
+            candidates.add(PurePosixPath(*rel_parts[:marker_idx]).as_posix())
+        candidates.add(PurePosixPath(*rel_parts[: marker_idx + 1]).as_posix())
+
+    candidates.discard("")
+    return candidates
+
+
+def _infinigen_sample_in_manifest(image_path, depth_path, data_root, manifest_entries):
+    candidates = _infinigen_manifest_candidates(
+        image_path=image_path,
+        depth_path=depth_path,
+        data_root=data_root,
+    )
+    return any(
+        _candidate_matches_manifest(candidate, manifest_entries)
+        for candidate in candidates
+    )
 
 
 class SynthHumanDataset(Dataset):
@@ -258,25 +338,42 @@ class InfinigenDataset(Dataset):
         truncnorm_min=0.02,
         start=0,
         train_ratio=1.0,
+        split_manifest=None,
     ):
         self.data_dir = data_dir
         self.data_list = []
         self.invalid_indices = set()
         self.reported_invalid_indices = set()
+        data_root = Path(data_dir)
+        manifest_entries = _load_split_manifest(split_manifest)
+        total_pairs = 0
 
-        for image_path in sorted(Path(data_dir).rglob("Image*.png")):
+        for image_path in sorted(data_root.rglob("Image*.png")):
             depth_name = image_path.name.replace("Image", "Depth", 1).rsplit(".", 1)[0] + ".npy"
             if "/Image/" in str(image_path):
                 depth_path = Path(str(image_path).replace("/Image/", "/Depth/")).with_name(depth_name)
             else:
                 depth_path = image_path.with_name(depth_name)
             if depth_path.exists():
+                total_pairs += 1
+                if manifest_entries is not None and not _infinigen_sample_in_manifest(
+                    image_path=image_path,
+                    depth_path=depth_path,
+                    data_root=data_root,
+                    manifest_entries=manifest_entries,
+                ):
+                    continue
                 self.data_list.append((str(image_path), str(depth_path)))
 
         self.data_list = self.data_list[start:]
         if not self.data_list:
             raise RuntimeError(
                 f"No Infinigen RGB/depth pairs found under {data_dir}"
+            )
+        if manifest_entries is not None:
+            print(
+                f"Infinigen manifest {split_manifest} kept "
+                f"{len(self.data_list)} of {total_pairs} RGB/depth pairs."
             )
 
         new_h, new_w = resolution
@@ -944,6 +1041,7 @@ if __name__ == "__main__":
                     norm_type=args.norm_type,
                     truncnorm_min=args.truncnorm_min,
                     train_ratio=args.train_ratio,
+                    split_manifest=args.get("train_infinigen_manifest"),
                 ),
                 shuffle=True,
                 batch_size=args.batch_size,
@@ -1077,6 +1175,7 @@ if __name__ == "__main__":
             norm_type=args.norm_type,
             truncnorm_min=args.truncnorm_min,
             resolution=args.resolution_hypersim,
+            split_manifest=args.get("infinigen_test_manifest"),
         ),
     )
     if infinigen_test_dataloader is not None:

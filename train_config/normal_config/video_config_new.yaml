@@ -43,6 +43,7 @@ train_all: false
 # validate
 denoise_strength: 1
 validation_scheduler_timesteps: 1
+max_validation_batches: 2
 
 # dataset:
 dataloader_num_workers: 4
@@ -59,6 +60,7 @@ batch_size: 8
 train_data_dir_hypersim: "../datasets/hypersim"
 train_data_dir_synthhuman: "../datasets/SynthHuman"
 train_data_dir_infinigen: "../datasets/infinigen"
+train_infinigen_manifest: null
 resolution_hypersim: [480, 640]
 random_flip: true
 norm_type: "trunc_disparity"
@@ -89,6 +91,7 @@ scannet_vid_test_data_root: 'your_scannet_dir'
 scannet_split_ls: 'configs/scannetv1_test.txt'
 nyuv2_test_data_root: 'your_nyuv2_dir'
 infinigen_test_data_root: "../datasets_network/infinigen"
+infinigen_test_manifest: null
 
 # Unique setting
 scheduler_training_weight_type: "equal" # late, equal, default
