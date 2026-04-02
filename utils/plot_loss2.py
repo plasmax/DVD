@@ -148,8 +148,8 @@ def main():
     grad_losses, _ = maybe_smooth(grad_losses, args)
 
     plt.figure(figsize=(12, 6))
-    plt.plot(steps, depth_losses, label="depth_loss")
-    plt.plot(steps, grad_losses, label="grad_loss")
+    plt.plot(steps, depth_losses, label="depth_loss (base latent-space MSE)")
+    plt.plot(steps, grad_losses, label="grad_loss (LMR)")
     plt.xlabel("Global Step")
     plt.ylabel("Loss")
     title = "Training Loss"
