@@ -36,6 +36,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from examples.wanvideo.model_training.training_loss import GradientLoss3DSeparate
 from examples.wanvideo.model_training.WanTrainingModule import WanTrainingModule
 from examples.wanvideo.model_training.train_with_accelerate_video import (
+    InfinigenDataset,
+    InfinigenVideoDataset,
     custom_collate_fn,
     get_data,
 )
@@ -71,8 +73,33 @@ def build_dataloader(args, dataset_name, batch_size):
             min_sample_stride=args.min_sample_stride,
             train_ratio=args.train_ratio,
         )
+    elif dataset_name == "infinigen":
+        infinigen_type = str(args.get("infinigen_test_dataset_type", "image")).lower()
+        if infinigen_type == "video":
+            dataset = InfinigenVideoDataset(
+                data_dir=args.infinigen_test_data_root,
+                random_flip=False,
+                norm_type=args.norm_type,
+                truncnorm_min=args.truncnorm_min,
+                resolution=args.resolution_hypersim,
+                max_num_frame=args.test_max_num_frame,
+                min_num_frame=args.test_min_num_frame,
+                max_sample_stride=args.test_max_sample_stride,
+                min_sample_stride=args.test_min_sample_stride,
+                split_manifest=args.get("infinigen_test_manifest"),
+                deterministic_sampling=True,
+            )
+        else:
+            dataset = InfinigenDataset(
+                data_dir=args.infinigen_test_data_root,
+                random_flip=False,
+                norm_type=args.norm_type,
+                truncnorm_min=args.truncnorm_min,
+                resolution=args.resolution_hypersim,
+                split_manifest=args.get("infinigen_test_manifest"),
+            )
     else:
-        raise ValueError(f"Unknown dataset: {dataset_name}. Use 'hypersim' or 'tartanair'.")
+        raise ValueError(f"Unknown dataset: {dataset_name}. Use 'hypersim', 'tartanair', or 'infinigen'.")
 
     return torch.utils.data.DataLoader(
         dataset,
@@ -135,7 +162,7 @@ def main():
     parser = argparse.ArgumentParser(description="Evaluate training loss on a checkpoint")
     parser.add_argument("--ckpt", required=True, help="Path to checkpoint dir (contains model.safetensors)")
     parser.add_argument("--config", required=True, help="Training config YAML")
-    parser.add_argument("--dataset", default="hypersim", choices=["hypersim", "tartanair"])
+    parser.add_argument("--dataset", default="hypersim", choices=["hypersim", "tartanair", "infinigen"])
     parser.add_argument("--num_batches", type=int, default=20, help="Number of batches to evaluate")
     parser.add_argument("--batch_size", type=int, default=None, help="Override batch size (default: from config)")
     cli_args = parser.parse_args()
