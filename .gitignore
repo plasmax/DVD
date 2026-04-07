@@ -24,6 +24,7 @@ diffsynth/models/__pycache__/
 ckpt/DVD/
 outputs/
 inference_results/
+configs/infinigen_val.txt
 *.mp4
 *.pdf
 *.png
