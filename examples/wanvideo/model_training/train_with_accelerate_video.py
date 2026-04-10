@@ -117,6 +117,47 @@ def _progress_log(message):
     sys.stdout.flush()
 
 
+def _bytes_to_gib(num_bytes):
+    return num_bytes / (1024 ** 3)
+
+
+def _reset_cuda_peak_memory_stats(accelerator):
+    device = accelerator.device
+    if device.type != "cuda" or not torch.cuda.is_available():
+        return
+    device_index = (
+        device.index if device.index is not None else torch.cuda.current_device()
+    )
+    torch.cuda.reset_peak_memory_stats(device_index)
+
+
+def _log_cuda_memory(accelerator, label):
+    device = accelerator.device
+    if device.type != "cuda" or not torch.cuda.is_available():
+        _progress_log(
+            f"GPU {accelerator.process_index} CUDA memory [{label}] unavailable on device {device}."
+        )
+        return
+
+    device_index = (
+        device.index if device.index is not None else torch.cuda.current_device()
+    )
+    free_bytes, total_bytes = torch.cuda.mem_get_info(device_index)
+    allocated_bytes = torch.cuda.memory_allocated(device_index)
+    reserved_bytes = torch.cuda.memory_reserved(device_index)
+    max_allocated_bytes = torch.cuda.max_memory_allocated(device_index)
+    max_reserved_bytes = torch.cuda.max_memory_reserved(device_index)
+    _progress_log(
+        f"GPU {accelerator.process_index} CUDA memory [{label}] "
+        f"allocated={_bytes_to_gib(allocated_bytes):.2f} GiB, "
+        f"reserved={_bytes_to_gib(reserved_bytes):.2f} GiB, "
+        f"free={_bytes_to_gib(free_bytes):.2f} GiB, "
+        f"total={_bytes_to_gib(total_bytes):.2f} GiB, "
+        f"peak_allocated={_bytes_to_gib(max_allocated_bytes):.2f} GiB, "
+        f"peak_reserved={_bytes_to_gib(max_reserved_bytes):.2f} GiB"
+    )
+
+
 def sanitize_infinigen_depth(depth):
     finite_positive = np.isfinite(depth) & (depth > 0)
     if not finite_positive.any():
@@ -925,19 +966,43 @@ def launch_training_task(
             writer = csv.writer(f)
             writer.writerow(["global_step", "depth_loss", "grad_loss", "learning_rate"])
 
-    if args.init_validate:
-        accelerator.print(
-            f"Starting validation with model at epoch {start_epoch}, global step {global_step}"
-        )
+    def _run_validation(current_global_step, save_training_state=False, reason="periodic"):
         model.pipe.dit.eval()
+        if save_training_state:
+            print(f"GPU {accelerator.process_index} saving training state...")
+            accelerator.save_state(
+                os.path.join(
+                    model_logger.output_path, f"checkpoint-step-{current_global_step}"
+                )
+            )
+            if accelerator.is_main_process:
+                torch.save(
+                    {"global_step": current_global_step},
+                    os.path.join(model_logger.output_path, "trainer_state.pt"),
+                )
+                accelerator.print(
+                    f"Checkpoint saved at step {current_global_step}"
+                )
+
+        gc.collect()
+        _log_cuda_memory(
+            accelerator,
+            f"before {reason} validation step {current_global_step}",
+        )
+        _reset_cuda_peak_memory_stats(accelerator)
         validator.validate(
             accelerator=accelerator,
             dataset_range=dataset_range,
             pipe=model.pipe,
-            global_step=global_step,
+            global_step=current_global_step,
             args=args,
             test_loader_dict=test_loader_dict,
             output_path=model_logger.output_path,
+        )
+        gc.collect()
+        _log_cuda_memory(
+            accelerator,
+            f"after {reason} validation step {current_global_step}",
         )
 
         model.pipe.scheduler.set_timesteps(
@@ -945,6 +1010,20 @@ def launch_training_task(
             denoise_step=args.denoise_step,
         )
         model.pipe.dit.train()
+        _log_cuda_memory(
+            accelerator,
+            f"after {reason} validation reset step {current_global_step}",
+        )
+
+    if args.init_validate:
+        accelerator.print(
+            f"Starting validation with model at epoch {start_epoch}, global step {global_step}"
+        )
+        _run_validation(
+            current_global_step=global_step,
+            save_training_state=False,
+            reason="initial",
+        )
     accelerator.wait_for_everyone()
 
     optimizer.zero_grad()
@@ -982,6 +1061,18 @@ def launch_training_task(
         )
         progress_bar.set_postfix(global_step=global_step)
         for small_batch_step in progress_bar:
+            should_run_validation = False
+            input_data = None
+            res_dict = None
+            depth_gt = None
+            pred = None
+            pred_rgb = None
+            pred_depth = None
+            loss = None
+            _grad_loss = None
+            _grad_t = None
+            _grad_h = None
+            _grad_w = None
             select_pos = random.choices(
                 population=range(len(train_dataloader_list)),
                 weights=prob,
@@ -1076,37 +1167,28 @@ def launch_training_task(
                         acm_cnt = 0
 
                     if (global_step) % validate_step == 0:
-                        model.pipe.dit.eval()
-                        print(f"GPU {rank} saving training state...")
-                        accelerator.save_state(
-                            os.path.join(model_logger.output_path,
-                                         f"checkpoint-step-{global_step}")
-                        )
-                        if accelerator.is_main_process:
+                        should_run_validation = True
 
-                            torch.save(
-                                {"global_step": global_step},
-                                os.path.join(
-                                    model_logger.output_path, "trainer_state.pt")
-                            )
-                            accelerator.print(
-                                f"Checkpoint saved at step {global_step}")
-                        validator.validate(
-                            accelerator=accelerator,
-                            pipe=model.pipe,
-                            dataset_range=dataset_range,
-                            global_step=global_step,
-                            args=args,
-                            test_loader_dict=test_loader_dict,
-                            output_path=model_logger.output_path,
-                        )
+            data = None
+            input_data = None
+            res_dict = None
+            depth_gt = None
+            pred = None
+            pred_rgb = None
+            pred_depth = None
+            loss = None
+            _grad_loss = None
+            _grad_t = None
+            _grad_h = None
+            _grad_w = None
 
-                        model.pipe.scheduler.set_timesteps(
-                            training=True,
-                            denoise_step=args.denoise_step,
-                        )
-                        model.pipe.dit.train()
-                    accelerator.wait_for_everyone()
+            if should_run_validation:
+                _run_validation(
+                    current_global_step=global_step,
+                    save_training_state=True,
+                    reason="periodic",
+                )
+            accelerator.wait_for_everyone()
 
             should_exit, global_step = maybe_save_and_exit_on_interrupt(
                 accelerator=accelerator,

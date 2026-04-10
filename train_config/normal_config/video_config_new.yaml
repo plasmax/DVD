@@ -27,7 +27,7 @@ global_step: 0
 num_epochs: 1000000
 gradient_accumulation_steps: 16
 validate_step: 300
-init_validate: true
+init_validate: false
 
 # Hyperparam:
 clip_grad_norm: true
@@ -43,7 +43,7 @@ train_all: false
 # validate
 denoise_strength: 1
 validation_scheduler_timesteps: 1
-max_validation_batches: 10
+max_validation_batches: 2
 
 # dataset:
 dataloader_num_workers: 4

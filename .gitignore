@@ -2,6 +2,7 @@ output/
 models/
 .venv/
 .uvcache/
+.codex
 ._____temp/
 .vscode/
 .venv/
