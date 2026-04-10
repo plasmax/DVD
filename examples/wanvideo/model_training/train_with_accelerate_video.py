@@ -557,6 +557,7 @@ class InfinigenVideoDataset(Dataset):
         deterministic_sampling=False,
         min_resolution=None,
         max_resolution=None,
+        resolution_budget_num_frames=None,
     ):
         self.data_dir = data_dir
         self.data_list = []
@@ -633,6 +634,16 @@ class InfinigenVideoDataset(Dataset):
         self.new_w = new_w
         self.min_resolution = tuple(min_resolution) if min_resolution else None
         self.max_resolution = tuple(max_resolution) if max_resolution else None
+        self.resolution_budget_num_frames = (
+            int(resolution_budget_num_frames)
+            if resolution_budget_num_frames is not None
+            else None
+        )
+        self.video_pixel_budget = (
+            self.new_h * self.new_w * self.resolution_budget_num_frames
+            if self.resolution_budget_num_frames is not None
+            else None
+        )
         self.transform = HypersimImageDepthNormalTransform(
             (new_h, new_w), random_flip, norm_type, truncnorm_min, False
         )
@@ -702,7 +713,14 @@ class InfinigenVideoDataset(Dataset):
             sampled_depth_paths = [depth_path_list[i] for i in clip_indices]
 
             if self.min_resolution and self.max_resolution:
-                res = sample_resolution(self.min_resolution, self.max_resolution)
+                max_area = None
+                if self.video_pixel_budget is not None and len(clip_indices) > 0:
+                    max_area = self.video_pixel_budget // len(clip_indices)
+                res = sample_resolution(
+                    self.min_resolution,
+                    self.max_resolution,
+                    max_area=max_area,
+                )
             else:
                 res = (self.new_h, self.new_w)
 
@@ -888,6 +906,7 @@ def custom_collate_fn(batch):
 def _build_tartanair_video_dataloader(args, accelerator):
     min_res = list(args.get("min_resolution", [])) or None
     max_res = list(args.get("max_resolution", [])) or None
+    resolution_budget_num_frames = args.get("video_resolution_budget_num_frames")
     dataset = TartanAir_VID_Dataset(
         data_dir=args.train_data_dir_ttr_vid,
         random_flip=args.random_flip,
@@ -899,6 +918,7 @@ def _build_tartanair_video_dataloader(args, accelerator):
         train_ratio=args.train_ratio,
         min_resolution=min_res,
         max_resolution=max_res,
+        resolution_budget_num_frames=resolution_budget_num_frames,
     )
     dataset.data_list = dataset.data_list * 100
     accelerator.print(f"Enlarged length of tartanair_video: {len(dataset)}")
@@ -1325,6 +1345,9 @@ if __name__ == "__main__":
     min_res = list(args.get("min_resolution", [])) or None
     max_res = list(args.get("max_resolution", [])) or None
     variable_resolution = min_res is not None and max_res is not None
+    video_resolution_budget_num_frames = args.get(
+        "video_resolution_budget_num_frames", 45
+    )
     # When resolution varies per sample, image datasets must use batch_size=1
     # to avoid shape mismatches in the collate function.
     img_batch_size = 1 if variable_resolution else args.batch_size
@@ -1332,6 +1355,11 @@ if __name__ == "__main__":
         accelerator.print(
             f"Variable resolution enabled: min={min_res}, max={max_res}. "
             f"Image datasets will use batch_size=1."
+        )
+        accelerator.print(
+            "Video resolution samples will be clipped to the "
+            f"{args.resolution_hypersim[0]}x{args.resolution_hypersim[1]}x"
+            f"{video_resolution_budget_num_frames} pixel-frame budget."
         )
 
     dataset_builders = [

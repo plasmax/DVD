@@ -62,13 +62,43 @@ def align_normals(normal, depth, K, H, W):
     return normal
 
 
-def sample_resolution(min_resolution, max_resolution, align=32):
-    """Sample a random (H, W) between min and max, each rounded to `align`."""
+def sample_resolution(min_resolution, max_resolution, align=32, max_area=None):
+    """Sample a random aligned (H, W) between min and max.
+
+    If ``max_area`` is provided, only sample candidates whose ``H * W`` fits
+    within that area budget. When no candidate fits, fall back to the smallest
+    aligned resolution in range.
+    """
     min_h, min_w = min_resolution
     max_h, max_w = max_resolution
-    h = random.randint(min_h // align, max_h // align) * align
-    w = random.randint(min_w // align, max_w // align) * align
-    return (h, w)
+
+    min_h = ((min_h + align - 1) // align) * align
+    min_w = ((min_w + align - 1) // align) * align
+    max_h = (max_h // align) * align
+    max_w = (max_w // align) * align
+
+    if min_h > max_h or min_w > max_w:
+        raise ValueError(
+            f"No valid aligned resolution between {min_resolution} and "
+            f"{max_resolution} with align={align}."
+        )
+
+    candidates = [
+        (h, w)
+        for h in range(min_h, max_h + 1, align)
+        for w in range(min_w, max_w + 1, align)
+    ]
+
+    if max_area is not None:
+        budgeted_candidates = [
+            (h, w) for h, w in candidates if h * w <= max_area
+        ]
+        if budgeted_candidates:
+            candidates = budgeted_candidates
+        else:
+            candidates = [min(candidates, key=lambda size: size[0] * size[1])]
+
+    return random.choice(candidates)
 
 
 class HypersimImageDepthNormalTransform:

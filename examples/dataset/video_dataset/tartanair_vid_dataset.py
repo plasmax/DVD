@@ -214,6 +214,7 @@ class TartanAir_VID_Dataset(Dataset):
         train_ratio=1.0,
         min_resolution=None,
         max_resolution=None,
+        resolution_budget_num_frames=None,
     ):
 
         self.data_list = []
@@ -252,6 +253,16 @@ class TartanAir_VID_Dataset(Dataset):
         self.new_w = new_w
         self.min_resolution = tuple(min_resolution) if min_resolution else None
         self.max_resolution = tuple(max_resolution) if max_resolution else None
+        self.resolution_budget_num_frames = (
+            int(resolution_budget_num_frames)
+            if resolution_budget_num_frames is not None
+            else None
+        )
+        self.video_pixel_budget = (
+            self.new_h * self.new_w * self.resolution_budget_num_frames
+            if self.resolution_budget_num_frames is not None
+            else None
+        )
         self.transform = TartanAirDepthTransform(
             (new_h, new_w), random_flip, norm_type, truncnorm_min
         )
@@ -339,7 +350,14 @@ class TartanAir_VID_Dataset(Dataset):
             # print(
             #     f"Shape of image: {image.shape}, range: {image.min()} - {image.max()}, dtype: {image.dtype}")
             if self.min_resolution and self.max_resolution:
-                res = sample_resolution(self.min_resolution, self.max_resolution)
+                max_area = None
+                if self.video_pixel_budget is not None and len(_sample_idx) > 0:
+                    max_area = self.video_pixel_budget // len(_sample_idx)
+                res = sample_resolution(
+                    self.min_resolution,
+                    self.max_resolution,
+                    max_area=max_area,
+                )
             else:
                 res = None
             image, depth, depth_raw = self.transform(image, depth_np, size=res)
