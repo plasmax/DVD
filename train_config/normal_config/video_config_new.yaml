@@ -36,7 +36,7 @@ use_gradient_checkpointing: true
 gradient_checkpoint_every_n: 4
 log_step: 10
 no_extra_frame: true
-warmup_steps: 0
+warmup_steps: 150
 mixed_precision: "bf16"
 train_all: false
 
@@ -62,6 +62,8 @@ train_data_dir_synthhuman: "../datasets/SynthHuman"
 train_data_dir_infinigen: "../datasets/infinigen"
 train_infinigen_manifest: null
 resolution_hypersim: [480, 640]
+min_resolution: [352, 480]
+max_resolution: [576, 768]
 random_flip: true
 norm_type: "trunc_disparity"
 truncnorm_min: 0.02

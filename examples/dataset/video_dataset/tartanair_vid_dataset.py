@@ -13,6 +13,8 @@ from PIL import Image
 from torch.utils.data import DataLoader, Dataset
 from torchvision import transforms
 
+from examples.dataset.hypersim_dataset import sample_resolution
+
 
 def torch_quantile(  # noqa: PLR0913 (too many arguments)
     tensor,
@@ -140,15 +142,16 @@ class TartanAirDepthTransform:
         self.truncnorm_max = 1 - truncnorm_min
         self.d_max = 50
 
-    def __call__(self, image, depth):
+    def __call__(self, image, depth, size=None):
+        size = size or self.size
         # resize
         image = transforms.functional.resize(
-            image, self.size, interpolation=Image.BILINEAR
+            image, size, interpolation=Image.BILINEAR
         )
 
         depth = torch.from_numpy(depth).unsqueeze(1)
         depth = torch.clamp(depth, 0, self.d_max)
-        depth = F.interpolate(depth, size=self.size, mode="nearest").squeeze(1)
+        depth = F.interpolate(depth, size=size, mode="nearest").squeeze(1)
 
         # random flip
         if self.random_flip and random.random() > 0.5:
@@ -209,6 +212,8 @@ class TartanAir_VID_Dataset(Dataset):
         min_sample_stride=None,
         start=0,
         train_ratio=1.0,
+        min_resolution=None,
+        max_resolution=None,
     ):
 
         self.data_list = []
@@ -245,6 +250,8 @@ class TartanAir_VID_Dataset(Dataset):
         new_h, new_w = resolution
         self.new_h = new_h
         self.new_w = new_w
+        self.min_resolution = tuple(min_resolution) if min_resolution else None
+        self.max_resolution = tuple(max_resolution) if max_resolution else None
         self.transform = TartanAirDepthTransform(
             (new_h, new_w), random_flip, norm_type, truncnorm_min
         )
@@ -331,7 +338,11 @@ class TartanAir_VID_Dataset(Dataset):
             # )
             # print(
             #     f"Shape of image: {image.shape}, range: {image.min()} - {image.max()}, dtype: {image.dtype}")
-            image, depth, depth_raw = self.transform(image, depth_np)
+            if self.min_resolution and self.max_resolution:
+                res = sample_resolution(self.min_resolution, self.max_resolution)
+            else:
+                res = None
+            image, depth, depth_raw = self.transform(image, depth_np, size=res)
 
             if torch.isnan(depth).any() or torch.isinf(depth).any():
                 print(

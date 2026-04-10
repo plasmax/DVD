@@ -24,7 +24,7 @@ from tqdm import tqdm
 from examples.dataset import (HypersimDataset, KITTI_VID_Dataset, NYUv2Dataset,
                               Scannet_VID_Dataset, TartanAir_VID_Dataset,
                               VKITTI_VID_Dataset, VKITTIDataset)
-from examples.dataset.hypersim_dataset import HypersimImageDepthNormalTransform
+from examples.dataset.hypersim_dataset import HypersimImageDepthNormalTransform, sample_resolution
 # Import modules
 from examples.wanvideo.model_training.DiffusionTrainingModule import \
     DiffusionTrainingModule
@@ -282,6 +282,8 @@ class SynthHumanDataset(Dataset):
         truncnorm_min=0.02,
         start=0,
         train_ratio=1.0,
+        min_resolution=None,
+        max_resolution=None,
     ):
         self.data_dir = data_dir
         self.data_list = []
@@ -314,6 +316,8 @@ class SynthHumanDataset(Dataset):
         new_h, new_w = resolution
         self.new_h = new_h
         self.new_w = new_w
+        self.min_resolution = tuple(min_resolution) if min_resolution else None
+        self.max_resolution = tuple(max_resolution) if max_resolution else None
         self.transform = HypersimImageDepthNormalTransform(
             (new_h, new_w), random_flip, norm_type, truncnorm_min, False
         )
@@ -354,6 +358,12 @@ class SynthHumanDataset(Dataset):
 
         try:
             img_path, dep_path = self.data_list[idx]
+
+            if self.min_resolution and self.max_resolution:
+                res = sample_resolution(self.min_resolution, self.max_resolution)
+            else:
+                res = (self.new_h, self.new_w)
+
             image = Image.open(img_path).convert("RGB")
 
             # SynthHuman depth is published in centimeters; convert to meters.
@@ -365,11 +375,11 @@ class SynthHumanDataset(Dataset):
 
             raw_depth = torch.from_numpy(depth).unsqueeze(0).unsqueeze(0)
             raw_depth = F.interpolate(
-                raw_depth, size=(self.new_h, self.new_w), mode="nearest"
+                raw_depth, size=res, mode="nearest"
             ).squeeze()
             raw_depth = torch.clamp(raw_depth, 1e-3, 65).repeat(3, 1, 1)
 
-            image, depth, normal = self.transform(image, depth, None)
+            image, depth, normal = self.transform(image, depth, None, size=res)
             if torch.isnan(image).any() or torch.isinf(image).any():
                 raise ValueError("image is nan or inf after transform")
             if torch.isnan(depth).any() or torch.isinf(depth).any():
@@ -404,6 +414,8 @@ class InfinigenDataset(Dataset):
         start=0,
         train_ratio=1.0,
         split_manifest=None,
+        min_resolution=None,
+        max_resolution=None,
     ):
         self.data_dir = data_dir
         self.data_list = []
@@ -444,6 +456,8 @@ class InfinigenDataset(Dataset):
         new_h, new_w = resolution
         self.new_h = new_h
         self.new_w = new_w
+        self.min_resolution = tuple(min_resolution) if min_resolution else None
+        self.max_resolution = tuple(max_resolution) if max_resolution else None
         self.transform = HypersimImageDepthNormalTransform(
             (new_h, new_w), random_flip, norm_type, truncnorm_min, False
         )
@@ -484,6 +498,12 @@ class InfinigenDataset(Dataset):
 
         try:
             img_path, dep_path = self.data_list[idx]
+
+            if self.min_resolution and self.max_resolution:
+                res = sample_resolution(self.min_resolution, self.max_resolution)
+            else:
+                res = (self.new_h, self.new_w)
+
             image = Image.open(img_path).convert("RGB")
 
             depth = np.load(dep_path)
@@ -493,11 +513,11 @@ class InfinigenDataset(Dataset):
 
             raw_depth = torch.from_numpy(depth).unsqueeze(0).unsqueeze(0)
             raw_depth = F.interpolate(
-                raw_depth, size=(self.new_h, self.new_w), mode="nearest"
+                raw_depth, size=res, mode="nearest"
             ).squeeze()
             raw_depth = torch.clamp(raw_depth, 1e-3, 65).repeat(3, 1, 1)
 
-            image, depth, normal = self.transform(image, depth, None)
+            image, depth, normal = self.transform(image, depth, None, size=res)
             if torch.isnan(image).any() or torch.isinf(image).any():
                 raise ValueError("image is nan or inf after transform")
             if torch.isnan(depth).any() or torch.isinf(depth).any():
@@ -535,6 +555,8 @@ class InfinigenVideoDataset(Dataset):
         min_sample_stride=None,
         split_manifest=None,
         deterministic_sampling=False,
+        min_resolution=None,
+        max_resolution=None,
     ):
         self.data_dir = data_dir
         self.data_list = []
@@ -609,6 +631,8 @@ class InfinigenVideoDataset(Dataset):
         new_h, new_w = resolution
         self.new_h = new_h
         self.new_w = new_w
+        self.min_resolution = tuple(min_resolution) if min_resolution else None
+        self.max_resolution = tuple(max_resolution) if max_resolution else None
         self.transform = HypersimImageDepthNormalTransform(
             (new_h, new_w), random_flip, norm_type, truncnorm_min, False
         )
@@ -677,6 +701,11 @@ class InfinigenVideoDataset(Dataset):
             sampled_img_paths = [img_path_list[i] for i in clip_indices]
             sampled_depth_paths = [depth_path_list[i] for i in clip_indices]
 
+            if self.min_resolution and self.max_resolution:
+                res = sample_resolution(self.min_resolution, self.max_resolution)
+            else:
+                res = (self.new_h, self.new_w)
+
             image_list = []
             disparity_list = []
             raw_depth_list = []
@@ -689,11 +718,11 @@ class InfinigenVideoDataset(Dataset):
 
                 raw_depth = torch.from_numpy(depth).unsqueeze(0).unsqueeze(0)
                 raw_depth = F.interpolate(
-                    raw_depth, size=(self.new_h, self.new_w), mode="nearest"
+                    raw_depth, size=res, mode="nearest"
                 ).squeeze()
                 raw_depth = torch.clamp(raw_depth, 1e-3, 65).repeat(3, 1, 1)
 
-                image, disparity, _ = self.transform(image, depth, None)
+                image, disparity, _ = self.transform(image, depth, None, size=res)
                 if torch.isnan(image).any() or torch.isinf(image).any():
                     raise ValueError("image is nan or inf after transform")
                 if torch.isnan(disparity).any() or torch.isinf(disparity).any():
@@ -857,6 +886,8 @@ def custom_collate_fn(batch):
 
 
 def _build_tartanair_video_dataloader(args, accelerator):
+    min_res = list(args.get("min_resolution", [])) or None
+    max_res = list(args.get("max_resolution", [])) or None
     dataset = TartanAir_VID_Dataset(
         data_dir=args.train_data_dir_ttr_vid,
         random_flip=args.random_flip,
@@ -866,6 +897,8 @@ def _build_tartanair_video_dataloader(args, accelerator):
         max_sample_stride=args.max_sample_stride,
         min_sample_stride=args.min_sample_stride,
         train_ratio=args.train_ratio,
+        min_resolution=min_res,
+        max_resolution=max_res,
     )
     dataset.data_list = dataset.data_list * 100
     accelerator.print(f"Enlarged length of tartanair_video: {len(dataset)}")
@@ -1288,6 +1321,19 @@ if __name__ == "__main__":
             "Expected `prob` to contain 6 entries in the order "
             "[hypersim_image, synthhuman_image, infinigen_image, vkitti_image, tartanair_video, vkitti_video]."
         )
+
+    min_res = list(args.get("min_resolution", [])) or None
+    max_res = list(args.get("max_resolution", [])) or None
+    variable_resolution = min_res is not None and max_res is not None
+    # When resolution varies per sample, image datasets must use batch_size=1
+    # to avoid shape mismatches in the collate function.
+    img_batch_size = 1 if variable_resolution else args.batch_size
+    if variable_resolution:
+        accelerator.print(
+            f"Variable resolution enabled: min={min_res}, max={max_res}. "
+            f"Image datasets will use batch_size=1."
+        )
+
     dataset_builders = [
         (
             "hypersim_image",
@@ -1302,9 +1348,11 @@ if __name__ == "__main__":
                     align_cam_normal=args.align_cam_normal,
                     split="train",
                     train_ratio=args.train_ratio,
+                    min_resolution=min_res,
+                    max_resolution=max_res,
                 ),
                 shuffle=True,
-                batch_size=args.batch_size,
+                batch_size=img_batch_size,
                 num_workers=2,
                 collate_fn=custom_collate_fn,
                 pin_memory=True,
@@ -1324,9 +1372,11 @@ if __name__ == "__main__":
                     norm_type=args.norm_type,
                     truncnorm_min=args.truncnorm_min,
                     train_ratio=args.train_ratio,
+                    min_resolution=min_res,
+                    max_resolution=max_res,
                 ),
                 shuffle=True,
-                batch_size=args.batch_size,
+                batch_size=img_batch_size,
                 num_workers=2,
                 collate_fn=custom_collate_fn,
                 pin_memory=True,
@@ -1347,9 +1397,11 @@ if __name__ == "__main__":
                     truncnorm_min=args.truncnorm_min,
                     train_ratio=args.train_ratio,
                     split_manifest=args.get("train_infinigen_manifest"),
+                    min_resolution=min_res,
+                    max_resolution=max_res,
                 ),
                 shuffle=True,
-                batch_size=args.batch_size,
+                batch_size=img_batch_size,
                 num_workers=2,
                 collate_fn=custom_collate_fn,
                 pin_memory=True,

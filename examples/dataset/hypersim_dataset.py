@@ -62,6 +62,15 @@ def align_normals(normal, depth, K, H, W):
     return normal
 
 
+def sample_resolution(min_resolution, max_resolution, align=32):
+    """Sample a random (H, W) between min and max, each rounded to `align`."""
+    min_h, min_w = min_resolution
+    max_h, max_w = max_resolution
+    h = random.randint(min_h // align, max_h // align) * align
+    w = random.randint(min_w // align, max_w // align) * align
+    return (h, w)
+
+
 class HypersimImageDepthNormalTransform:
     def __init__(self, size, random_flip, norm_type, truncnorm_min=0.02, align_cam_normal=False) -> None:
         self.size = size
@@ -72,25 +81,28 @@ class HypersimImageDepthNormalTransform:
         self.d_max = 65
         self.align_cam_normal = align_cam_normal
 
-    def to_tensor_and_resize_normal(self, normal):
+    def to_tensor_and_resize_normal(self, normal, size=None):
+        size = size or self.size
         # to tensor
         normal = torch.from_numpy(normal).permute(2, 0, 1).unsqueeze(0)
         # resize
-        normal = F.interpolate(normal, size=self.size,
+        normal = F.interpolate(normal, size=size,
                                mode='nearest').squeeze()
         # shape = 3 * 768 * 1024
         return normal
 
-    def empty_normal(self):
-        return torch.zeros((3, self.size[0], self.size[1]), dtype=torch.float32)
+    def empty_normal(self, size=None):
+        size = size or self.size
+        return torch.zeros((3, size[0], size[1]), dtype=torch.float32)
 
-    def __call__(self, image, depth, normal):
+    def __call__(self, image, depth, normal, size=None):
+        size = size or self.size
         # resize
         image = transforms.functional.resize(
-            image, self.size, interpolation=Image.BILINEAR)
+            image, size, interpolation=Image.BILINEAR)
 
         depth = torch.from_numpy(depth).unsqueeze(0).unsqueeze(0)
-        depth = F.interpolate(depth, size=self.size, mode='nearest').squeeze()
+        depth = F.interpolate(depth, size=size, mode='nearest').squeeze()
 
         if normal is not None:
             # convert the inward normals to outward normals
@@ -100,9 +112,9 @@ class HypersimImageDepthNormalTransform:
                 H, W = normal.shape[:2]
                 normal = align_normals(
                     normal, depth, [886.81, 886.81, W/2, H/2], H, W)
-            normal = self.to_tensor_and_resize_normal(normal)
+            normal = self.to_tensor_and_resize_normal(normal, size)
         else:
-            normal = self.empty_normal()
+            normal = self.empty_normal(size)
 
         # random flip
         if self.random_flip and random.random() > 0.5:
@@ -159,7 +171,8 @@ class HypersimImageDepthNormalTransform:
 
 class HypersimDataset(Dataset):
     def __init__(self, data_dir,  random_flip, norm_type, resolution=(480, 720),
-                 truncnorm_min=0.02, align_cam_normal=False, split="train", start=0, train_ratio=1.0):
+                 truncnorm_min=0.02, align_cam_normal=False, split="train", start=0, train_ratio=1.0,
+                 min_resolution=None, max_resolution=None):
 
         self.data_list = []
         split_dir = os.path.join(data_dir, split)
@@ -192,6 +205,8 @@ class HypersimDataset(Dataset):
         new_h, new_w = resolution
         self.new_h = new_h
         self.new_w = new_w
+        self.min_resolution = tuple(min_resolution) if min_resolution else None
+        self.max_resolution = tuple(max_resolution) if max_resolution else None
         self.transform = HypersimImageDepthNormalTransform(
             (new_h, new_w), random_flip, norm_type, truncnorm_min, align_cam_normal
         )
@@ -231,6 +246,11 @@ class HypersimDataset(Dataset):
         try:
             img_path, dep_path, nor_path = self.data_list[idx]
 
+            if self.min_resolution and self.max_resolution:
+                res = sample_resolution(self.min_resolution, self.max_resolution)
+            else:
+                res = (self.new_h, self.new_w)
+
             image = Image.open(img_path).convert("RGB")
 
             # load depth (distance → depth)
@@ -245,8 +265,7 @@ class HypersimDataset(Dataset):
             if (depth <= 0).any():
                 raise ValueError("depth contains non-positive values")
             raw_depth = torch.from_numpy(depth).unsqueeze(0).unsqueeze(0)
-            raw_depth = F.interpolate(raw_depth, size=(
-                self.new_h, self.new_w), mode='nearest').squeeze()
+            raw_depth = F.interpolate(raw_depth, size=res, mode='nearest').squeeze()
             raw_depth = torch.clamp(raw_depth, 1e-3, 65).repeat(3, 1, 1)
 
             normal = None
@@ -254,7 +273,7 @@ class HypersimDataset(Dataset):
                 with h5py.File(nor_path, 'r') as f:
                     normal = np.array(f["dataset"])
 
-            image, depth, normal = self.transform(image, depth, normal)
+            image, depth, normal = self.transform(image, depth, normal, size=res)
             if torch.isnan(image).any() or torch.isinf(image).any():
                 raise ValueError("image is nan or inf after transform")
             if torch.isnan(depth).any() or torch.isinf(depth).any():
