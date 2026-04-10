@@ -266,7 +266,7 @@ def generate_depth_sliced(
     window_size=45,
     overlap=9,
     scale_only=False,
-    trim_frames=16,
+    trim_frames=0,
 ):
     B, T, C, H, W = input_rgb.shape
     depth_windows, output_windows = get_trimmed_window_plan(
@@ -446,7 +446,7 @@ def parse_args():
     parser.add_argument(
         "--trim_frames",
         type=int,
-        default=16,
+        default=0,
         help="Warmup frames to prepend and discard from each inference window.",
     )
     parser.add_argument("--start", type=int)
