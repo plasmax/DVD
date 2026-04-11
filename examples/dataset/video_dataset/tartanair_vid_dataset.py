@@ -216,6 +216,7 @@ class TartanAir_VID_Dataset(Dataset):
         min_resolution=None,
         max_resolution=None,
         resolution_budget_num_frames=None,
+        resolution_budget_scale=1.0,
         log_sample_shapes=0,
     ):
 
@@ -260,8 +261,14 @@ class TartanAir_VID_Dataset(Dataset):
             if resolution_budget_num_frames is not None
             else None
         )
+        self.resolution_budget_scale = float(resolution_budget_scale)
         self.video_pixel_budget = (
-            self.new_h * self.new_w * self.resolution_budget_num_frames
+            int(
+                self.new_h
+                * self.new_w
+                * self.resolution_budget_num_frames
+                * self.resolution_budget_scale
+            )
             if self.resolution_budget_num_frames is not None
             else None
         )
@@ -292,11 +299,12 @@ class TartanAir_VID_Dataset(Dataset):
         if self.video_pixel_budget is None:
             return None
         base_area = self.new_h * self.new_w
+        scaled_base_area = int(base_area * self.resolution_budget_scale)
         budget_frames = max(int(self.resolution_budget_num_frames), 1)
-        spatial_area_budget = base_area
+        spatial_area_budget = scaled_base_area
         volume_area_budget = self.video_pixel_budget // max(num_frames, 1)
         temporal_area_budget = (
-            base_area * budget_frames * budget_frames
+            scaled_base_area * budget_frames * budget_frames
         ) // max(num_frames * num_frames, 1)
         return min(spatial_area_budget, volume_area_budget, temporal_area_budget)
 

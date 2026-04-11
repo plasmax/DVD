@@ -11,6 +11,15 @@ from pathlib import Path, PurePosixPath
 
 import csv
 import numpy as np
+
+_cuda_alloc_conf = os.environ.get("PYTORCH_CUDA_ALLOC_CONF", "")
+if "expandable_segments" not in _cuda_alloc_conf:
+    os.environ["PYTORCH_CUDA_ALLOC_CONF"] = (
+        f"{_cuda_alloc_conf},expandable_segments:True"
+        if _cuda_alloc_conf
+        else "expandable_segments:True"
+    )
+
 import torch
 import torch.nn.functional as F
 from accelerate import Accelerator, accelerator
@@ -133,6 +142,13 @@ def _reset_cuda_peak_memory_stats(accelerator):
     torch.cuda.reset_peak_memory_stats(device_index)
 
 
+def _empty_cuda_cache(accelerator):
+    device = accelerator.device
+    if device.type != "cuda" or not torch.cuda.is_available():
+        return
+    torch.cuda.empty_cache()
+
+
 def _log_cuda_memory(accelerator, label):
     device = accelerator.device
     if device.type != "cuda" or not torch.cuda.is_available():
@@ -158,6 +174,11 @@ def _log_cuda_memory(accelerator, label):
         f"peak_allocated={_bytes_to_gib(max_allocated_bytes):.2f} GiB, "
         f"peak_reserved={_bytes_to_gib(max_reserved_bytes):.2f} GiB"
     )
+
+
+def _wan_latent_tokens(num_frames, height, width):
+    latent_frames = (int(num_frames) - 1) // 4 + 1
+    return latent_frames * (int(height) // 16) * (int(width) // 16)
 
 
 def sanitize_infinigen_depth(depth):
@@ -560,6 +581,7 @@ class InfinigenVideoDataset(Dataset):
         min_resolution=None,
         max_resolution=None,
         resolution_budget_num_frames=None,
+        resolution_budget_scale=1.0,
         log_sample_shapes=0,
     ):
         self.data_dir = data_dir
@@ -642,8 +664,14 @@ class InfinigenVideoDataset(Dataset):
             if resolution_budget_num_frames is not None
             else None
         )
+        self.resolution_budget_scale = float(resolution_budget_scale)
         self.video_pixel_budget = (
-            self.new_h * self.new_w * self.resolution_budget_num_frames
+            int(
+                self.new_h
+                * self.new_w
+                * self.resolution_budget_num_frames
+                * self.resolution_budget_scale
+            )
             if self.resolution_budget_num_frames is not None
             else None
         )
@@ -677,11 +705,12 @@ class InfinigenVideoDataset(Dataset):
         if self.video_pixel_budget is None:
             return None
         base_area = self.new_h * self.new_w
+        scaled_base_area = int(base_area * self.resolution_budget_scale)
         budget_frames = max(int(self.resolution_budget_num_frames), 1)
-        spatial_area_budget = base_area
+        spatial_area_budget = scaled_base_area
         volume_area_budget = self.video_pixel_budget // max(num_frames, 1)
         temporal_area_budget = (
-            base_area * budget_frames * budget_frames
+            scaled_base_area * budget_frames * budget_frames
         ) // max(num_frames * num_frames, 1)
         return min(spatial_area_budget, volume_area_budget, temporal_area_budget)
 
@@ -944,6 +973,7 @@ def _build_tartanair_video_dataloader(args, accelerator):
     min_res = list(args.get("min_resolution", [])) or None
     max_res = list(args.get("max_resolution", [])) or None
     resolution_budget_num_frames = args.get("video_resolution_budget_num_frames")
+    resolution_budget_scale = float(args.get("video_resolution_budget_scale", 1.0))
     video_num_workers = int(args.get("video_dataloader_num_workers", 1))
     video_persistent_workers = bool(video_num_workers > 0)
     dataset = TartanAir_VID_Dataset(
@@ -958,6 +988,7 @@ def _build_tartanair_video_dataloader(args, accelerator):
         min_resolution=min_res,
         max_resolution=max_res,
         resolution_budget_num_frames=resolution_budget_num_frames,
+        resolution_budget_scale=resolution_budget_scale,
         log_sample_shapes=int(args.get("log_video_sample_shapes", 4)),
     )
     dataset.data_list = dataset.data_list * 100
@@ -1096,6 +1127,7 @@ def launch_training_task(
             output_path=model_logger.output_path,
         )
         gc.collect()
+        _empty_cuda_cache(accelerator)
         _log_cuda_memory(
             accelerator,
             f"after {reason} validation step {current_global_step}",
@@ -1202,7 +1234,20 @@ def launch_training_task(
                         accelerator,
                         f"before forward batch {logged_batch_shapes}",
                     )
-                res_dict = model(input_data, args=args)
+                try:
+                    res_dict = model(input_data, args=args)
+                except torch.OutOfMemoryError:
+                    _progress_log(
+                        "OOM during training forward "
+                        f"batch={input_data['batch_size']} "
+                        f"frames={input_data['num_frames']} "
+                        f"height={input_data['height']} "
+                        f"width={input_data['width']} "
+                        "approx_wan_tokens="
+                        f"{_wan_latent_tokens(input_data['num_frames'], input_data['height'], input_data['width'])}"
+                    )
+                    _log_cuda_memory(accelerator, "after training forward OOM")
+                    raise
                 depth_gt = res_dict['depth_gt']
                 pred = res_dict['pred']
 
@@ -1405,6 +1450,9 @@ if __name__ == "__main__":
     video_resolution_budget_num_frames = args.get(
         "video_resolution_budget_num_frames", 45
     )
+    video_resolution_budget_scale = float(
+        args.get("video_resolution_budget_scale", 1.0)
+    )
     # When resolution varies per sample, image datasets must use batch_size=1
     # to avoid shape mismatches in the collate function.
     img_batch_size = 1 if variable_resolution else args.batch_size
@@ -1416,7 +1464,8 @@ if __name__ == "__main__":
         accelerator.print(
             "Video frame/resolution pairs will be clipped to the "
             f"{args.resolution_hypersim[0]}x{args.resolution_hypersim[1]}x"
-            f"{video_resolution_budget_num_frames} pixel-frame budget."
+            f"{video_resolution_budget_num_frames} pixel-frame budget "
+            f"with scale {video_resolution_budget_scale:.2f}."
         )
 
     dataset_builders = [
@@ -1625,6 +1674,7 @@ if __name__ == "__main__":
             split_manifest=args.get("infinigen_test_manifest"),
             deterministic_sampling=True,
             resolution_budget_num_frames=video_resolution_budget_num_frames,
+            resolution_budget_scale=video_resolution_budget_scale,
         )
     elif infinigen_eval_dataset_type == "image":
         infinigen_eval_builder = lambda: InfinigenDataset(

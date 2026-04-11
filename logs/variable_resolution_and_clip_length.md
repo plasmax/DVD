@@ -22,6 +22,9 @@ improve robustness at inference time.
   so some very long clips are only legal at the smallest resolutions and
   `61`-frame clips are skipped entirely with the current
   `min_resolution: [352, 480]`.
+- The active config applies `video_resolution_budget_scale: 0.9` on top
+  of that budget to leave headroom for CUDA allocator fragmentation from
+  variable shapes.
 - Image datasets automatically switch to batch_size=1 when enabled
   (required because torch.stack in the collate function needs uniform shapes)
 - No architectural changes needed: RoPE handles variable spatial dims,
@@ -49,6 +52,7 @@ min_num_frame: 21   # was 45
 min_resolution: [352, 480]   # new
 max_resolution: [576, 768]   # new
 video_resolution_budget_num_frames: 45   # keeps video T*H*W near the old budget
+video_resolution_budget_scale: 0.9   # leaves headroom for variable-shape allocation
 video_dataloader_num_workers: 1   # reduce startup/prefetch memory pressure
 
 # Warmup
