@@ -1673,8 +1673,8 @@ if __name__ == "__main__":
             min_sample_stride=args.test_min_sample_stride,
             split_manifest=args.get("infinigen_test_manifest"),
             deterministic_sampling=True,
-            resolution_budget_num_frames=video_resolution_budget_num_frames,
-            resolution_budget_scale=video_resolution_budget_scale,
+            # Validation stays at a fixed resolution for reproducibility, so it
+            # must not inherit the train-time frame/resolution budget.
         )
     elif infinigen_eval_dataset_type == "image":
         infinigen_eval_builder = lambda: InfinigenDataset(

@@ -27,7 +27,7 @@ global_step: 0
 num_epochs: 1000000
 gradient_accumulation_steps: 16
 validate_step: 300
-init_validate: false
+init_validate: true
 
 # Hyperparam:
 clip_grad_norm: true
