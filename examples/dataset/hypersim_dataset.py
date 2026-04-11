@@ -62,13 +62,10 @@ def align_normals(normal, depth, K, H, W):
     return normal
 
 
-def sample_resolution(min_resolution, max_resolution, align=32, max_area=None):
-    """Sample a random aligned (H, W) between min and max.
-
-    If ``max_area`` is provided, only sample candidates whose ``H * W`` fits
-    within that area budget. When no candidate fits, fall back to the smallest
-    aligned resolution in range.
-    """
+def aligned_resolution_candidates(
+    min_resolution, max_resolution, align=32, max_area=None
+):
+    """Return aligned ``(H, W)`` candidates between min and max."""
     min_h, min_w = min_resolution
     max_h, max_w = max_resolution
 
@@ -90,13 +87,37 @@ def sample_resolution(min_resolution, max_resolution, align=32, max_area=None):
     ]
 
     if max_area is not None:
-        budgeted_candidates = [
-            (h, w) for h, w in candidates if h * w <= max_area
-        ]
-        if budgeted_candidates:
-            candidates = budgeted_candidates
-        else:
-            candidates = [min(candidates, key=lambda size: size[0] * size[1])]
+        candidates = [(h, w) for h, w in candidates if h * w <= max_area]
+
+    return candidates
+
+
+def sample_resolution(
+    min_resolution,
+    max_resolution,
+    align=32,
+    max_area=None,
+    fallback_to_smallest=True,
+):
+    """Sample a random aligned (H, W) between min and max."""
+    candidates = aligned_resolution_candidates(
+        min_resolution,
+        max_resolution,
+        align=align,
+        max_area=max_area,
+    )
+    if not candidates:
+        if not fallback_to_smallest:
+            raise ValueError(
+                f"No valid aligned resolution between {min_resolution} and "
+                f"{max_resolution} with align={align} and max_area={max_area}."
+            )
+        candidates = aligned_resolution_candidates(
+            min_resolution,
+            max_resolution,
+            align=align,
+        )
+        candidates = [min(candidates, key=lambda size: size[0] * size[1])]
 
     return random.choice(candidates)
 

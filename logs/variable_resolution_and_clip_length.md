@@ -17,9 +17,11 @@ improve robustness at inference time.
 - ~0.73x to ~1.2x of the original [480, 640]
 - Sampled per item in `__getitem__`, H and W each rounded to nearest 32
 - Video clips now couple sampled resolution to sampled clip length so the
-  total pixel-frame budget stays close to the original `480x640x45`
-  training envelope. Short clips can still reach the max resolution; long
-  clips are sampled from the smaller end of the range.
+  total memory envelope stays close to the original `480x640x45`
+  training setup. The sampler enforces a joint frame/resolution budget,
+  so some very long clips are only legal at the smallest resolutions and
+  `61`-frame clips are skipped entirely with the current
+  `min_resolution: [352, 480]`.
 - Image datasets automatically switch to batch_size=1 when enabled
   (required because torch.stack in the collate function needs uniform shapes)
 - No architectural changes needed: RoPE handles variable spatial dims,
@@ -47,6 +49,7 @@ min_num_frame: 21   # was 45
 min_resolution: [352, 480]   # new
 max_resolution: [576, 768]   # new
 video_resolution_budget_num_frames: 45   # keeps video T*H*W near the old budget
+video_dataloader_num_workers: 1   # reduce startup/prefetch memory pressure
 
 # Warmup
 warmup_steps: 150   # was 0

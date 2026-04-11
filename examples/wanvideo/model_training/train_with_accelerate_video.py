@@ -24,7 +24,9 @@ from tqdm import tqdm
 from examples.dataset import (HypersimDataset, KITTI_VID_Dataset, NYUv2Dataset,
                               Scannet_VID_Dataset, TartanAir_VID_Dataset,
                               VKITTI_VID_Dataset, VKITTIDataset)
-from examples.dataset.hypersim_dataset import HypersimImageDepthNormalTransform, sample_resolution
+from examples.dataset.hypersim_dataset import (HypersimImageDepthNormalTransform,
+                                               aligned_resolution_candidates,
+                                               sample_resolution)
 # Import modules
 from examples.wanvideo.model_training.DiffusionTrainingModule import \
     DiffusionTrainingModule
@@ -558,6 +560,7 @@ class InfinigenVideoDataset(Dataset):
         min_resolution=None,
         max_resolution=None,
         resolution_budget_num_frames=None,
+        log_sample_shapes=0,
     ):
         self.data_dir = data_dir
         self.data_list = []
@@ -644,6 +647,8 @@ class InfinigenVideoDataset(Dataset):
             if self.resolution_budget_num_frames is not None
             else None
         )
+        self.log_sample_shapes = log_sample_shapes
+        self._logged_sample_shapes = 0
         self.transform = HypersimImageDepthNormalTransform(
             (new_h, new_w), random_flip, norm_type, truncnorm_min, False
         )
@@ -668,7 +673,19 @@ class InfinigenVideoDataset(Dataset):
             next_idx = (next_idx + 1) % len(self.data_list)
         return next_idx
 
-    def _select_clip_indices(self, total_frames):
+    def _max_area_for_num_frames(self, num_frames):
+        if self.video_pixel_budget is None:
+            return None
+        base_area = self.new_h * self.new_w
+        budget_frames = max(int(self.resolution_budget_num_frames), 1)
+        spatial_area_budget = base_area
+        volume_area_budget = self.video_pixel_budget // max(num_frames, 1)
+        temporal_area_budget = (
+            base_area * budget_frames * budget_frames
+        ) // max(num_frames * num_frames, 1)
+        return min(spatial_area_budget, volume_area_budget, temporal_area_budget)
+
+    def _select_clip_spec(self, total_frames):
         valid_choices = []
         for stride in self.strides:
             for num_frames in self.num_frames:
@@ -676,7 +693,20 @@ class InfinigenVideoDataset(Dataset):
                     continue
                 total_frames_required = stride * (num_frames - 1) + 1
                 if total_frames_required <= total_frames:
-                    valid_choices.append((num_frames, stride, total_frames_required))
+                    max_area = self._max_area_for_num_frames(num_frames)
+                    if self.min_resolution and self.max_resolution:
+                        res_candidates = aligned_resolution_candidates(
+                            self.min_resolution,
+                            self.max_resolution,
+                            max_area=max_area,
+                        )
+                        if not res_candidates:
+                            continue
+                    elif max_area is not None and (self.new_h * self.new_w) > max_area:
+                        continue
+                    valid_choices.append(
+                        (num_frames, stride, total_frames_required, max_area)
+                    )
 
         if not valid_choices:
             raise ValueError(
@@ -687,14 +717,14 @@ class InfinigenVideoDataset(Dataset):
 
         if self.deterministic_sampling:
             valid_choices.sort(key=lambda item: (-item[0], item[1]))
-            num_frames, stride, total_frames_required = valid_choices[0]
+            num_frames, stride, total_frames_required, max_area = valid_choices[0]
             start_idx = max(0, (total_frames - total_frames_required) // 2)
         else:
-            num_frames, stride, total_frames_required = random.choice(valid_choices)
+            num_frames, stride, total_frames_required, max_area = random.choice(valid_choices)
             start_idx = random.randint(0, total_frames - total_frames_required)
 
         end_idx = start_idx + total_frames_required
-        return list(range(start_idx, end_idx, stride))
+        return list(range(start_idx, end_idx, stride)), num_frames, max_area
 
     def __getitem__(self, idx):
         idx = idx % len(self.data_list)
@@ -708,21 +738,28 @@ class InfinigenVideoDataset(Dataset):
             depth_path_list = sample["depth_path_list"]
             assert len(img_path_list) == len(depth_path_list)
 
-            clip_indices = self._select_clip_indices(len(img_path_list))
+            clip_indices, sampled_num_frames, sampled_max_area = self._select_clip_spec(
+                len(img_path_list)
+            )
             sampled_img_paths = [img_path_list[i] for i in clip_indices]
             sampled_depth_paths = [depth_path_list[i] for i in clip_indices]
 
             if self.min_resolution and self.max_resolution:
-                max_area = None
-                if self.video_pixel_budget is not None and len(clip_indices) > 0:
-                    max_area = self.video_pixel_budget // len(clip_indices)
                 res = sample_resolution(
                     self.min_resolution,
                     self.max_resolution,
-                    max_area=max_area,
+                    max_area=sampled_max_area,
+                    fallback_to_smallest=False,
                 )
             else:
                 res = (self.new_h, self.new_w)
+            if self._logged_sample_shapes < self.log_sample_shapes:
+                self._logged_sample_shapes += 1
+                print(
+                    "Infinigen sample "
+                    f"frames={sampled_num_frames} resolution={res} "
+                    f"max_area={sampled_max_area} sequence={sequence_name}"
+                )
 
             image_list = []
             disparity_list = []
@@ -907,6 +944,8 @@ def _build_tartanair_video_dataloader(args, accelerator):
     min_res = list(args.get("min_resolution", [])) or None
     max_res = list(args.get("max_resolution", [])) or None
     resolution_budget_num_frames = args.get("video_resolution_budget_num_frames")
+    video_num_workers = int(args.get("video_dataloader_num_workers", 1))
+    video_persistent_workers = bool(video_num_workers > 0)
     dataset = TartanAir_VID_Dataset(
         data_dir=args.train_data_dir_ttr_vid,
         random_flip=args.random_flip,
@@ -919,19 +958,23 @@ def _build_tartanair_video_dataloader(args, accelerator):
         min_resolution=min_res,
         max_resolution=max_res,
         resolution_budget_num_frames=resolution_budget_num_frames,
+        log_sample_shapes=int(args.get("log_video_sample_shapes", 4)),
     )
     dataset.data_list = dataset.data_list * 100
     accelerator.print(f"Enlarged length of tartanair_video: {len(dataset)}")
-    return torch.utils.data.DataLoader(
-        dataset,
+    dataloader_kwargs = dict(
+        dataset=dataset,
         shuffle=True,
         batch_size=1,
-        num_workers=2,
+        num_workers=video_num_workers,
         collate_fn=custom_collate_fn,
         pin_memory=True,
-        persistent_workers=True,
+        persistent_workers=video_persistent_workers,
         drop_last=True,
     )
+    if video_num_workers > 0:
+        dataloader_kwargs["prefetch_factor"] = 1
+    return torch.utils.data.DataLoader(**dataloader_kwargs)
 
 
 def _build_vkitti_video_dataloader(args, accelerator):
@@ -1082,6 +1125,7 @@ def launch_training_task(
     optimizer.zero_grad()
     accumulate_depth_loss = 0.0
     accumulate_grad_loss = 0.0
+    logged_batch_shapes = 0
 
     acm_cnt = 0
     rank = accelerator.process_index
@@ -1145,6 +1189,19 @@ def launch_training_task(
             # Forward and backward pass
             with accelerator.accumulate(model):
                 input_data = get_data(data, args=args)
+                if logged_batch_shapes < 4:
+                    logged_batch_shapes += 1
+                    _progress_log(
+                        "Training batch shape "
+                        f"batch={input_data['batch_size']} "
+                        f"frames={input_data['num_frames']} "
+                        f"height={input_data['height']} "
+                        f"width={input_data['width']}"
+                    )
+                    _log_cuda_memory(
+                        accelerator,
+                        f"before forward batch {logged_batch_shapes}",
+                    )
                 res_dict = model(input_data, args=args)
                 depth_gt = res_dict['depth_gt']
                 pred = res_dict['pred']
@@ -1357,7 +1414,7 @@ if __name__ == "__main__":
             f"Image datasets will use batch_size=1."
         )
         accelerator.print(
-            "Video resolution samples will be clipped to the "
+            "Video frame/resolution pairs will be clipped to the "
             f"{args.resolution_hypersim[0]}x{args.resolution_hypersim[1]}x"
             f"{video_resolution_budget_num_frames} pixel-frame budget."
         )
@@ -1567,6 +1624,7 @@ if __name__ == "__main__":
             min_sample_stride=args.test_min_sample_stride,
             split_manifest=args.get("infinigen_test_manifest"),
             deterministic_sampling=True,
+            resolution_budget_num_frames=video_resolution_budget_num_frames,
         )
     elif infinigen_eval_dataset_type == "image":
         infinigen_eval_builder = lambda: InfinigenDataset(
@@ -1603,6 +1661,7 @@ if __name__ == "__main__":
     model = prepared[0]
     optimizer = prepared[1]
     scheduler = prepared[2]
+    _log_cuda_memory(accelerator, "after accelerator.prepare")
     num_train_dataloaders = len(train_dataloader_list)
     train_dataloader_list = list(prepared[3:3 + num_train_dataloaders])
     prepared_eval_loaders = prepared[3 + num_train_dataloaders:]

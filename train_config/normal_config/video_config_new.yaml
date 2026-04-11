@@ -65,6 +65,8 @@ resolution_hypersim: [480, 640]
 min_resolution: [352, 480]
 max_resolution: [576, 768]
 video_resolution_budget_num_frames: 45
+video_dataloader_num_workers: 1
+log_video_sample_shapes: 4
 random_flip: true
 norm_type: "trunc_disparity"
 truncnorm_min: 0.02

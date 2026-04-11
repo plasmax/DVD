@@ -13,7 +13,8 @@ from PIL import Image
 from torch.utils.data import DataLoader, Dataset
 from torchvision import transforms
 
-from examples.dataset.hypersim_dataset import sample_resolution
+from examples.dataset.hypersim_dataset import (aligned_resolution_candidates,
+                                              sample_resolution)
 
 
 def torch_quantile(  # noqa: PLR0913 (too many arguments)
@@ -215,6 +216,7 @@ class TartanAir_VID_Dataset(Dataset):
         min_resolution=None,
         max_resolution=None,
         resolution_budget_num_frames=None,
+        log_sample_shapes=0,
     ):
 
         self.data_list = []
@@ -263,6 +265,8 @@ class TartanAir_VID_Dataset(Dataset):
             if self.resolution_budget_num_frames is not None
             else None
         )
+        self.log_sample_shapes = log_sample_shapes
+        self._logged_sample_shapes = 0
         self.transform = TartanAirDepthTransform(
             (new_h, new_w), random_flip, norm_type, truncnorm_min
         )
@@ -284,6 +288,18 @@ class TartanAir_VID_Dataset(Dataset):
     def __len__(self):
         return len(self.data_list)
 
+    def _max_area_for_num_frames(self, num_frames):
+        if self.video_pixel_budget is None:
+            return None
+        base_area = self.new_h * self.new_w
+        budget_frames = max(int(self.resolution_budget_num_frames), 1)
+        spatial_area_budget = base_area
+        volume_area_budget = self.video_pixel_budget // max(num_frames, 1)
+        temporal_area_budget = (
+            base_area * budget_frames * budget_frames
+        ) // max(num_frames * num_frames, 1)
+        return min(spatial_area_budget, volume_area_budget, temporal_area_budget)
+
     def __getitem__(self, idx):
         idx = idx % len(self.data_list)
         try:
@@ -302,6 +318,8 @@ class TartanAir_VID_Dataset(Dataset):
                     f"Not enough frames for scene {scene_name}. Need at least {self.min_num_frame} frames, but got {total_frames}."
                 )
 
+            sampled_num_frames = None
+            sampled_max_area = None
             _sample_idx = None
             for _ in range(1000):
                 _stride = random.choice(self.strides)
@@ -311,9 +329,22 @@ class TartanAir_VID_Dataset(Dataset):
                 _total_frames_req = _stride * (_num_frames - 1) + 1
                 if _total_frames_req > total_frames:
                     continue
+                _max_area = self._max_area_for_num_frames(_num_frames)
+                if self.min_resolution and self.max_resolution:
+                    _res_candidates = aligned_resolution_candidates(
+                        self.min_resolution,
+                        self.max_resolution,
+                        max_area=_max_area,
+                    )
+                    if not _res_candidates:
+                        continue
+                elif _max_area is not None and (self.new_h * self.new_w) > _max_area:
+                    continue
                 start_idx = random.randint(0, total_frames - _total_frames_req)
                 end_idx = start_idx + _total_frames_req
                 _sample_idx = list(range(start_idx, end_idx, _stride))
+                sampled_num_frames = _num_frames
+                sampled_max_area = _max_area
                 break
             if _sample_idx is None:
                 raise ValueError(
@@ -350,16 +381,21 @@ class TartanAir_VID_Dataset(Dataset):
             # print(
             #     f"Shape of image: {image.shape}, range: {image.min()} - {image.max()}, dtype: {image.dtype}")
             if self.min_resolution and self.max_resolution:
-                max_area = None
-                if self.video_pixel_budget is not None and len(_sample_idx) > 0:
-                    max_area = self.video_pixel_budget // len(_sample_idx)
                 res = sample_resolution(
                     self.min_resolution,
                     self.max_resolution,
-                    max_area=max_area,
+                    max_area=sampled_max_area,
+                    fallback_to_smallest=False,
                 )
             else:
                 res = None
+            if self._logged_sample_shapes < self.log_sample_shapes:
+                self._logged_sample_shapes += 1
+                print(
+                    "TartanAir sample "
+                    f"frames={sampled_num_frames} resolution={res} "
+                    f"max_area={sampled_max_area} scene={scene_name}"
+                )
             image, depth, depth_raw = self.transform(image, depth_np, size=res)
 
             if torch.isnan(depth).any() or torch.isinf(depth).any():
