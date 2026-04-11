@@ -386,7 +386,7 @@ class WanVideoPipeline(BasePipeline):
             # WanVideoUnit_NoiseInitializer(),
             WanVideoUnit_InputVideoEmbedder(),
             WanVideoUnit_PromptEmbedder(),
-            WanVideoUnit_ImageEmbedder(),
+            # WanVideoUnit_ImageEmbedder(),
             # WanVideoUnit_FunReference(),
             # WanVideoUnit_CameraPoseEmbedder(),
             # WanVideoUnit_SpeedControl(),
