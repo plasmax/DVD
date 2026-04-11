@@ -1584,39 +1584,6 @@ def model_fn_wan_video(
     gradient_checkpoint_every_n: int = 1,
     **kwargs,
 ):
-    if sliding_window_size is not None and sliding_window_stride is not None:
-        model_kwargs = dict(
-            dit=dit,
-            motion_controller=motion_controller,
-            vace=vace,
-            latents=latents,
-            timestep=timestep,
-            context=context,
-            clip_feature=clip_feature,
-            y=y,
-            reference_latents=reference_latents,
-            vace_context=vace_context,
-            vace_scale=vace_scale,
-            tea_cache=tea_cache,
-            use_unified_sequence_parallel=use_unified_sequence_parallel,
-            motion_bucket_id=motion_bucket_id,
-        )
-        return TemporalTiler_BCTHW().run(
-            model_fn_wan_video,
-            sliding_window_size,
-            sliding_window_stride,
-            latents.device,
-            latents.dtype,
-            model_kwargs=model_kwargs,
-            tensor_names=["latents", "y"],
-            batch_size=2 if cfg_merge else 1,
-        )
-
-    if use_unified_sequence_parallel:
-        import torch.distributed as dist
-        from xfuser.core.distributed import (get_sequence_parallel_rank,
-                                             get_sequence_parallel_world_size,
-                                             get_sp_group)
 
     # x = latents
     # print(f"Receving x with shape{x.shape}")
@@ -1625,9 +1592,7 @@ def model_fn_wan_video(
     t_mod = dit.time_projection(t).unflatten(1, (6, dit.dim))
     # print(f"t_mod shape: {t_mod.shape}")
     # print(f"first ten element{t_mod[0][:10]}")
-    if motion_bucket_id is not None and motion_controller is not None:
-        t_mod = t_mod + \
-            motion_controller(motion_bucket_id).unflatten(1, (6, dit.dim))
+
     context = dit.text_embedding(context)
 
     # c_b, c_c, c_f, c_h, c_w = x.shape
@@ -1639,12 +1604,6 @@ def model_fn_wan_video(
 
     if timestep.shape[0] != context.shape[0]:
         timestep = torch.concat([timestep] * context.shape[0], dim=0)
-    # import pdb
-    # pdb.set_trace()
-    if dit.has_image_input:
-        latents = torch.cat([latents, y], dim=1)  # (b, c_x + c_y, f, h, w)
-        clip_embdding = dit.img_emb(clip_feature)
-        context = torch.cat([clip_embdding, context], dim=1)
 
     latents, (f, h, w) = dit.patchify(latents, None)
     _shortcut = latents
