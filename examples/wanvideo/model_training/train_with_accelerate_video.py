@@ -595,8 +595,10 @@ class InfinigenVideoDataset(Dataset):
         self.min_sample_stride = min_sample_stride
         self.num_frames = list(range(min_num_frame, max_num_frame + 1))
         self.strides = list(range(min_sample_stride, max_sample_stride + 1))
-        valid_frame_counts = [frame_count for frame_count in self.num_frames if frame_count % 4 == 1]
-        if not valid_frame_counts:
+        self.valid_frame_counts = [
+            frame_count for frame_count in self.num_frames if frame_count % 4 == 1
+        ]
+        if not self.valid_frame_counts:
             raise ValueError(
                 "InfinigenVideoDataset requires at least one frame count where num_frames % 4 == 1."
             )
@@ -631,7 +633,7 @@ class InfinigenVideoDataset(Dataset):
             record["img_path_list"].append(str(image_path))
             record["depth_path_list"].append(str(depth_path))
 
-        min_required_frames = min(valid_frame_counts)
+        min_required_frames = min(self.valid_frame_counts)
         self.data_list = [
             record
             for _, record in sorted(sequence_map.items())
@@ -677,6 +679,7 @@ class InfinigenVideoDataset(Dataset):
         )
         self.log_sample_shapes = log_sample_shapes
         self._logged_sample_shapes = 0
+        self._initialize_sampleable_frame_counts()
         self.transform = HypersimImageDepthNormalTransform(
             (new_h, new_w), random_flip, norm_type, truncnorm_min, False
         )
@@ -701,6 +704,55 @@ class InfinigenVideoDataset(Dataset):
             next_idx = (next_idx + 1) % len(self.data_list)
         return next_idx
 
+    def _resolution_candidates_for_num_frames(self, num_frames):
+        max_area = self._max_area_for_num_frames(num_frames)
+        if self.min_resolution and self.max_resolution:
+            candidates = aligned_resolution_candidates(
+                self.min_resolution,
+                self.max_resolution,
+                max_area=max_area,
+            )
+        elif max_area is not None and (self.new_h * self.new_w) > max_area:
+            candidates = []
+        else:
+            candidates = [(self.new_h, self.new_w)]
+        return candidates, max_area
+
+    def _initialize_sampleable_frame_counts(self):
+        sampleable_frame_counts = []
+        blocked_frame_counts = []
+        for frame_count in self.valid_frame_counts:
+            candidates, max_area = self._resolution_candidates_for_num_frames(frame_count)
+            if candidates:
+                sampleable_frame_counts.append(frame_count)
+            else:
+                blocked_frame_counts.append((frame_count, max_area))
+
+        if not sampleable_frame_counts:
+            raise ValueError(
+                "InfinigenVideoDataset could not find any frame counts that fit "
+                "the configured resolution constraints."
+            )
+
+        self.sampleable_frame_counts = sampleable_frame_counts
+
+        if blocked_frame_counts:
+            min_area = (
+                self.min_resolution[0] * self.min_resolution[1]
+                if self.min_resolution and self.max_resolution
+                else self.new_h * self.new_w
+            )
+            blocked_summary = ", ".join(
+                f"{frame_count} (max_area={max_area})"
+                for frame_count, max_area in blocked_frame_counts
+            )
+            print(
+                "InfinigenVideoDataset unreachable frame counts under the current "
+                f"resolution budget: {blocked_summary}. "
+                f"smallest_allowed_area={min_area}, "
+                f"effective_max_num_frame={max(sampleable_frame_counts)}"
+            )
+
     def _max_area_for_num_frames(self, num_frames):
         if self.video_pixel_budget is None:
             return None
@@ -717,21 +769,13 @@ class InfinigenVideoDataset(Dataset):
     def _select_clip_spec(self, total_frames):
         valid_choices = []
         for stride in self.strides:
-            for num_frames in self.num_frames:
-                if num_frames % 4 != 1:
-                    continue
+            for num_frames in self.sampleable_frame_counts:
                 total_frames_required = stride * (num_frames - 1) + 1
                 if total_frames_required <= total_frames:
-                    max_area = self._max_area_for_num_frames(num_frames)
-                    if self.min_resolution and self.max_resolution:
-                        res_candidates = aligned_resolution_candidates(
-                            self.min_resolution,
-                            self.max_resolution,
-                            max_area=max_area,
-                        )
-                        if not res_candidates:
-                            continue
-                    elif max_area is not None and (self.new_h * self.new_w) > max_area:
+                    res_candidates, max_area = self._resolution_candidates_for_num_frames(
+                        num_frames
+                    )
+                    if not res_candidates:
                         continue
                     valid_choices.append(
                         (num_frames, stride, total_frames_required, max_area)

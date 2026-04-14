@@ -291,9 +291,68 @@ class TartanAir_VID_Dataset(Dataset):
         else:
             print(
                 f"TartanAir_VID_Dataset use origin {len(self.data_list)} samples...")
+        self._initialize_sampleable_frame_counts()
 
     def __len__(self):
         return len(self.data_list)
+
+    def _resolution_candidates_for_num_frames(self, num_frames):
+        max_area = self._max_area_for_num_frames(num_frames)
+        if self.min_resolution and self.max_resolution:
+            candidates = aligned_resolution_candidates(
+                self.min_resolution,
+                self.max_resolution,
+                max_area=max_area,
+            )
+        elif max_area is not None and (self.new_h * self.new_w) > max_area:
+            candidates = []
+        else:
+            candidates = [(self.new_h, self.new_w)]
+        return candidates, max_area
+
+    def _initialize_sampleable_frame_counts(self):
+        valid_frame_counts = [
+            frame_count for frame_count in self.num_frames if frame_count % 4 == 1
+        ]
+        if not valid_frame_counts:
+            raise ValueError(
+                "TartanAir_VID_Dataset requires at least one frame count "
+                "where num_frames % 4 == 1."
+            )
+
+        sampleable_frame_counts = []
+        blocked_frame_counts = []
+        for frame_count in valid_frame_counts:
+            candidates, max_area = self._resolution_candidates_for_num_frames(frame_count)
+            if candidates:
+                sampleable_frame_counts.append(frame_count)
+            else:
+                blocked_frame_counts.append((frame_count, max_area))
+
+        if not sampleable_frame_counts:
+            raise ValueError(
+                "TartanAir_VID_Dataset could not find any frame counts that fit "
+                "the configured resolution constraints."
+            )
+
+        self.sampleable_frame_counts = sampleable_frame_counts
+
+        if blocked_frame_counts:
+            min_area = (
+                self.min_resolution[0] * self.min_resolution[1]
+                if self.min_resolution and self.max_resolution
+                else self.new_h * self.new_w
+            )
+            blocked_summary = ", ".join(
+                f"{frame_count} (max_area={max_area})"
+                for frame_count, max_area in blocked_frame_counts
+            )
+            print(
+                "TartanAir_VID_Dataset unreachable frame counts under the current "
+                f"resolution budget: {blocked_summary}. "
+                f"smallest_allowed_area={min_area}, "
+                f"effective_max_num_frame={max(sampleable_frame_counts)}"
+            )
 
     def _max_area_for_num_frames(self, num_frames):
         if self.video_pixel_budget is None:
@@ -331,22 +390,14 @@ class TartanAir_VID_Dataset(Dataset):
             _sample_idx = None
             for _ in range(1000):
                 _stride = random.choice(self.strides)
-                _num_frames = random.choice(self.num_frames)
-                if _num_frames % 4 != 1:
-                    continue
+                _num_frames = random.choice(self.sampleable_frame_counts)
                 _total_frames_req = _stride * (_num_frames - 1) + 1
                 if _total_frames_req > total_frames:
                     continue
-                _max_area = self._max_area_for_num_frames(_num_frames)
-                if self.min_resolution and self.max_resolution:
-                    _res_candidates = aligned_resolution_candidates(
-                        self.min_resolution,
-                        self.max_resolution,
-                        max_area=_max_area,
-                    )
-                    if not _res_candidates:
-                        continue
-                elif _max_area is not None and (self.new_h * self.new_w) > _max_area:
+                _res_candidates, _max_area = self._resolution_candidates_for_num_frames(
+                    _num_frames
+                )
+                if not _res_candidates:
                     continue
                 start_idx = random.randint(0, total_frames - _total_frames_req)
                 end_idx = start_idx + _total_frames_req
