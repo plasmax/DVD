@@ -1,5 +1,6 @@
 import argparse
 import glob
+import math
 import os
 import re
 from multiprocessing import Pool
@@ -200,18 +201,13 @@ def pad_time_mod4(video_tensor):
 def get_window_index(T, window_size, overlap):
     if T <= window_size:
         return [(0, T)]
-    res = [(0, window_size)]
-    start = window_size - overlap
-    while start < T:
-        end = start + window_size
-        if end < T:
-            res.append((start, end))
-            start += window_size - overlap
-        else:
-            start = max(0, T - window_size)
-            res.append((start, T))
-            break
-    return res
+    stride = window_size - overlap
+    n_windows = math.ceil((T - window_size) / stride) + 1
+    if n_windows == 1:
+        return [(0, min(window_size, T))]
+    span = T - window_size
+    starts = [round(i * span / (n_windows - 1)) for i in range(n_windows)]
+    return [(s, min(s + window_size, T)) for s in starts]
 
 
 def get_trimmed_window_plan(T, window_size, overlap, trim_frames):
@@ -237,22 +233,22 @@ def get_trimmed_window_plan(T, window_size, overlap, trim_frames):
     if T <= window_size:
         return [(0, T)], [(0, T)]
 
-    inference_windows = [(0, window_size)]
-    output_windows = [(0, window_size)]
+    n_windows = math.ceil((T - window_size) / stride) + 1
+    span = T - window_size
+    if n_windows == 1:
+        starts = [0]
+    else:
+        starts = [round(i * span / (n_windows - 1)) for i in range(n_windows)]
 
-    start = stride
-    while start < T:
-        end = start + window_size
-        if end < T:
-            inference_windows.append((start, end))
-            output_windows.append((start + trim_frames, end))
-            start += stride
+    inference_windows = []
+    output_windows = []
+    for i, s in enumerate(starts):
+        end = min(s + window_size, T)
+        inference_windows.append((s, end))
+        if i == 0:
+            output_windows.append((s, end))
         else:
-            start = max(0, T - window_size)
-            if inference_windows[-1][0] != start:
-                inference_windows.append((start, T))
-                output_windows.append((start + trim_frames, T))
-            break
+            output_windows.append((s + trim_frames, end))
 
     return inference_windows, output_windows
 
