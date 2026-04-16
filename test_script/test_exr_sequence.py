@@ -211,86 +211,31 @@ def get_window_index(T, window_size, overlap):
     return [(s, min(s + window_size, T)) for s in starts]
 
 
-def get_trimmed_window_plan(T, window_size, overlap, trim_frames):
-    """Plans fixed-length inference windows with warmup trimmed from later windows."""
-    if trim_frames == 0:
-        inference_windows = get_window_index(T, window_size, overlap)
-        output_windows = inference_windows.copy()
-        return inference_windows, output_windows
+def get_overlap_regions(windows):
+    regions = []
+    for i in range(1, len(windows)):
+        overlap_start = windows[i][0]
+        overlap_end = min(windows[i - 1][1], windows[i][1])
+        if overlap_end > overlap_start:
+            regions.append((overlap_start, overlap_end))
+    return regions
 
-    usable_frames = window_size - trim_frames
-    stride = usable_frames - overlap
-    if usable_frames <= 0:
-        raise ValueError(
-            f"trim_frames must be smaller than window_size, got trim_frames={trim_frames}, "
-            f"window_size={window_size}"
-        )
-    if stride <= 0:
-        raise ValueError(
-            "overlap must be smaller than the usable frames after trimming, got "
-            f"overlap={overlap}, usable_frames={usable_frames}"
-        )
 
-    if T <= window_size:
-        return [(0, T)], [(0, T)]
-
-    n_windows = math.ceil((T - window_size) / stride) + 1
-    span = T - window_size
-    if n_windows == 1:
-        starts = [0]
-    else:
-        starts = [round(i * span / (n_windows - 1)) for i in range(n_windows)]
-
-    inference_windows = []
-    output_windows = []
-    for i, s in enumerate(starts):
-        end = min(s + window_size, T)
-        inference_windows.append((s, end))
-        if i == 0:
-            output_windows.append((s, end))
-        else:
-            output_windows.append((s + trim_frames, end))
-
-    return inference_windows, output_windows
+def get_overlap_patch_windows(T, windows, patch_margin=5):
+    return [
+        (max(0, start - patch_margin), min(T, end + patch_margin))
+        for start, end in get_overlap_regions(windows)
+    ]
 
 
 # =============================
 # Core Inference
 # =============================
-def generate_depth_sliced(
-    model,
-    input_rgb,
-    window_size=45,
-    overlap=9,
-    scale_only=False,
-    trim_frames=0,
-    offset=0,
-):
-    B, T, C, H, W = input_rgb.shape
-
-    if offset > 0 and offset < T:
-        # Offset pass: small initial window [0, offset], then normal windows from offset
-        initial_window = [(0, offset)]
-        remaining_T = T - offset
-        if remaining_T > 0:
-            later = get_window_index(remaining_T, window_size, overlap)
-            later_windows = [(s + offset, min(e + offset, T)) for s, e in later]
-            depth_windows = initial_window + later_windows
-        else:
-            depth_windows = initial_window
-        output_windows = depth_windows
-        print(f"offset={offset}, depth_windows {depth_windows}")
-        print(f"output_windows {output_windows}")
-    else:
-        depth_windows, output_windows = get_trimmed_window_plan(
-            T, window_size, overlap, trim_frames
-        )
-        print(f"depth_windows {depth_windows}")
-        print(f"output_windows {output_windows}")
-
+def infer_depth_windows(model, input_rgb, depth_windows, desc="Inferencing Slices"):
+    B = input_rgb.shape[0]
     depth_res_list = []
 
-    for window_idx, (start, end) in enumerate(tqdm(depth_windows, desc="Inferencing Slices")):
+    for start, end in tqdm(depth_windows, desc=desc):
         input_rgb_slice = input_rgb[:, start:end]
 
         input_rgb_slice, origin_T = pad_time_mod4(input_rgb_slice)
@@ -315,11 +260,14 @@ def generate_depth_sliced(
             denoise_step=model.args.denoise_step,
         )
         depth = depth_to_single_channel(outputs["depth"])
-        if offset > 0:
-            trimmed_start = 0
-        else:
-            trimmed_start = 0 if window_idx == 0 else min(trim_frames, origin_T)
-        depth_res_list.append(depth[:, trimmed_start:origin_T])
+        depth_res_list.append(depth[:, :origin_T])
+
+    return depth_res_list
+
+
+def stitch_depth_windows(depth_res_list, output_windows, T, scale_only=False):
+    if not depth_res_list:
+        raise ValueError("No depth windows to stitch.")
 
     depth_list_aligned = None
     prev_end = None
@@ -389,6 +337,62 @@ def generate_depth_sliced(
     return depth_list_aligned[:, :T]
 
 
+def generate_depth_sliced(model, input_rgb, window_size=45, overlap=9, scale_only=False):
+    T = input_rgb.shape[1]
+    depth_windows = get_window_index(T, window_size, overlap)
+    print(f"depth_windows {depth_windows}")
+    print(f"output_windows {depth_windows}")
+
+    depth_res_list = infer_depth_windows(model, input_rgb, depth_windows)
+    return stitch_depth_windows(depth_res_list, depth_windows, T, scale_only=scale_only)
+
+
+def generate_overlap_patch_depth(
+    model, input_rgb, reference_depth, window_size=45, overlap=9, patch_margin=5
+):
+    T = input_rgb.shape[1]
+    normal_windows = get_window_index(T, window_size, overlap)
+    patch_windows = get_overlap_patch_windows(T, normal_windows, patch_margin)
+    print(f"normal_windows {normal_windows}")
+    print(f"overlap_patch_windows {patch_windows}")
+
+    if not patch_windows:
+        print("No overlap patches needed; copying reference depth.")
+        return reference_depth.copy()
+
+    patch_depths = infer_depth_windows(
+        model, input_rgb, patch_windows, desc="Inferencing Overlap Patches"
+    )
+    patched_depth = reference_depth.copy()
+
+    for i, (patch_depth, (start, end)) in enumerate(
+        zip(patch_depths, patch_windows), start=1
+    ):
+        patch_depth = patch_depth[0]
+        ref_patch = reference_depth[start:end]
+
+        scale, shift = compute_scale_and_shift(patch_depth, ref_patch)
+        scale = np.clip(scale, 0.7, 1.5)
+        aligned_patch = patch_depth * scale + shift
+        aligned_patch[aligned_patch < 0] = 0
+
+        diff = np.abs(aligned_patch - ref_patch)
+        mae_scalar = float(diff.mean())
+
+        print(f"\n[Overlap Patch {i}]")
+        print(f"patch start: {start}, end: {end}, length: {end - start}")
+        print(f"scale = {scale:.8f}, shift = {shift:.8f}")
+        print(f"patch MAE(after align to normal pass) = {mae_scalar:.6f}")
+        print(
+            f"aligned patch range = {aligned_patch.min():.6f} ~ "
+            f"{aligned_patch.max():.6f}"
+        )
+
+        patched_depth[start:end] = aligned_patch
+
+    return patched_depth
+
+
 # =============================
 # Pipeline Components
 # =============================
@@ -437,7 +441,6 @@ def predict_depth(model, input_tensor, args):
         input_tensor,
         args.window_size,
         args.overlap,
-        trim_frames=args.trim_frames,
     )[0]
     print(f"depth range shape {depth.min()} - {depth.max()}, shape {depth.shape}")
 
@@ -469,7 +472,10 @@ def save_blue_depth_sequence(depth, frame_numbers, output_pattern, workers=None)
     ]
 
     if len(work) <= 2:
-        outputs = [_save_blue_depth_worker(args) for args in tqdm(work, desc="Writing blue channel")]
+        outputs = [
+            _save_blue_depth_worker(args)
+            for args in tqdm(work, desc="Writing blue channel")
+        ]
     else:
         with Pool(workers) as pool:
             outputs = list(
@@ -489,27 +495,18 @@ def save_results(depth, frame_numbers, args):
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--ckpt", type=str, default="ckpt", required=False)
     parser.add_argument("-i", "--input_sequence", type=str, required=True)
     parser.add_argument("-o", "--output_sequence", type=str, required=True)
-    parser.add_argument("--model_config", default="ckpt/model_config.yaml")
     parser.add_argument("--window_size", type=int, default=81)
     parser.add_argument("--height", type=int, default=480)
     parser.add_argument("--width", type=int, default=640)
     parser.add_argument("--overlap", type=int, default=9)
-    parser.add_argument(
-        "--trim_frames",
-        type=int,
-        default=0,
-        help="Warmup frames to prepend and discard from each inference window.",
-    )
     parser.add_argument("--start", type=int)
     parser.add_argument("--end", type=int)
     parser.add_argument(
         "--double",
         action="store_true",
-        help="Run a second offset pass (shifted by half the window size) and store "
-             "its depth in the blue channel. Useful for blending away temporal artifacts.",
+        help="Run independent overlap repair patches and store them in the blue channel.",
     )
     return parser.parse_args()
 
@@ -519,14 +516,18 @@ def parse_args():
 # =============================
 def main():
     args = parse_args()
-    if args.trim_frames < 0:
-        raise ValueError(f"trim_frames must be non-negative, got {args.trim_frames}")
     if args.start is not None and args.end is not None and args.start > args.end:
-        raise ValueError(f"Invalid frame range: start={args.start} is greater than end={args.end}")
+        raise ValueError(
+            f"Invalid frame range: start={args.start} is greater than end={args.end}"
+        )
 
-    yaml_args = OmegaConf.load(args.model_config)
+    ckpt_dir = "ckpt"
+    model_config = "ckpt/model_config.yaml"
+    patch_margin = 5
 
-    model = load_model(args.ckpt, yaml_args)
+    yaml_args = OmegaConf.load(model_config)
+
+    model = load_model(ckpt_dir, yaml_args)
     input_tensor, frame_numbers = load_exr_data(args)
 
     # First pass: normal inference -> red channel
@@ -534,31 +535,25 @@ def main():
     save_results(depth, frame_numbers, args)
 
     if args.double:
-        # Second pass: offset by half window size -> blue channel
-        offset = args.window_size // 2
-        print(f"\n=== Double pass: running offset inference (offset={offset}) ===")
-        depth_offset = generate_depth_sliced(
+        print(
+            "\n=== Double pass: running independent overlap repair patches "
+            f"(margin={patch_margin}) ==="
+        )
+        depth_patches_aligned = generate_overlap_patch_depth(
             model,
             input_tensor,
+            depth,
             args.window_size,
             args.overlap,
-            trim_frames=args.trim_frames,
-            offset=offset,
-        )[0]
-        print(f"offset depth range {depth_offset.min()} - {depth_offset.max()}, "
-              f"shape {depth_offset.shape}")
-
-        # Scale/shift align offset pass to match the first pass
-        scale, shift = compute_scale_and_shift(depth_offset, depth)
-        scale = np.clip(scale, 0.7, 1.5)
-        depth_offset_aligned = depth_offset * scale + shift
-        depth_offset_aligned[depth_offset_aligned < 0] = 0
-        print(f"offset alignment: scale={scale:.6f}, shift={shift:.6f}")
-        print(f"aligned offset range {depth_offset_aligned.min()} - "
-              f"{depth_offset_aligned.max()}")
+            patch_margin=patch_margin,
+        )
+        print(
+            f"patch depth range {depth_patches_aligned.min()} - "
+            f"{depth_patches_aligned.max()}, shape {depth_patches_aligned.shape}"
+        )
 
         outputs = save_blue_depth_sequence(
-            depth_offset_aligned, frame_numbers, args.output_sequence
+            depth_patches_aligned, frame_numbers, args.output_sequence
         )
         print(f"Wrote blue channel to {len(outputs)} EXR frames")
 
