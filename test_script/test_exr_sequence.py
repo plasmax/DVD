@@ -497,6 +497,8 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("-i", "--input_sequence", type=str, required=True)
     parser.add_argument("-o", "--output_sequence", type=str, required=True)
+    parser.add_argument("--ckpt", type=str, default="ckpt", required=False)
+    parser.add_argument("--model_config", default="ckpt/model_config.yaml", required=False)
     parser.add_argument("--window_size", type=int, default=81)
     parser.add_argument("--height", type=int, default=480)
     parser.add_argument("--width", type=int, default=640)
@@ -521,13 +523,11 @@ def main():
             f"Invalid frame range: start={args.start} is greater than end={args.end}"
         )
 
-    ckpt_dir = "ckpt"
-    model_config = "ckpt/model_config.yaml"
     patch_margin = 5
 
-    yaml_args = OmegaConf.load(model_config)
+    yaml_args = OmegaConf.load(args.model_config)
 
-    model = load_model(ckpt_dir, yaml_args)
+    model = load_model(args.ckpt, yaml_args)
     input_tensor, frame_numbers = load_exr_data(args)
 
     # First pass: normal inference -> red channel
