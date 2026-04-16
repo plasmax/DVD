@@ -131,6 +131,28 @@ def save_depth_exr(output_path, depth):
         exr_file.write(str(output_path))
 
 
+def add_blue_channel_to_depth_exr(path, blue_depth):
+    """Read existing R channel from a depth EXR, rewrite with R=original, G=0, B=blue_depth."""
+    red_depth = read_depth_exr(str(path))
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    red = np.ascontiguousarray(red_depth).astype("f")
+    blue = np.ascontiguousarray(blue_depth).astype("f")
+    zeros = np.zeros_like(red)
+    header = {
+        "compression": OpenEXR.ZIP_COMPRESSION,
+        "type": OpenEXR.scanlineimage,
+    }
+    channels = {
+        "R": red,
+        "G": zeros,
+        "B": blue,
+    }
+    with OpenEXR.File(header, channels) as exr_file:
+        exr_file.write(str(path))
+
+
 def save_rgb_depth_exr(output_path, depth):
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)

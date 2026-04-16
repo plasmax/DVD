@@ -18,13 +18,14 @@ from tqdm import tqdm
 from examples.wanvideo.model_training.WanTrainingModule import \
     WanTrainingModule
 try:
-    from test_script.exr import (filter_frame_range, format_sequence_path,
+    from test_script.exr import (add_blue_channel_to_depth_exr,
+                                 filter_frame_range, format_sequence_path,
                                  gather_exr_sequence, linear_to_srgb,
                                  read_exr_rgb, save_depth_exr)
 except ModuleNotFoundError:
-    from exr import (filter_frame_range, format_sequence_path,
-                     gather_exr_sequence, linear_to_srgb, read_exr_rgb,
-                     save_depth_exr)
+    from exr import (add_blue_channel_to_depth_exr, filter_frame_range,
+                     format_sequence_path, gather_exr_sequence,
+                     linear_to_srgb, read_exr_rgb, save_depth_exr)
 
 
 # =============================
@@ -263,13 +264,29 @@ def generate_depth_sliced(
     overlap=9,
     scale_only=False,
     trim_frames=0,
+    offset=0,
 ):
     B, T, C, H, W = input_rgb.shape
-    depth_windows, output_windows = get_trimmed_window_plan(
-        T, window_size, overlap, trim_frames
-    )
-    print(f"depth_windows {depth_windows}")
-    print(f"output_windows {output_windows}")
+
+    if offset > 0 and offset < T:
+        # Offset pass: small initial window [0, offset], then normal windows from offset
+        initial_window = [(0, offset)]
+        remaining_T = T - offset
+        if remaining_T > 0:
+            later = get_window_index(remaining_T, window_size, overlap)
+            later_windows = [(s + offset, min(e + offset, T)) for s, e in later]
+            depth_windows = initial_window + later_windows
+        else:
+            depth_windows = initial_window
+        output_windows = depth_windows
+        print(f"offset={offset}, depth_windows {depth_windows}")
+        print(f"output_windows {output_windows}")
+    else:
+        depth_windows, output_windows = get_trimmed_window_plan(
+            T, window_size, overlap, trim_frames
+        )
+        print(f"depth_windows {depth_windows}")
+        print(f"output_windows {output_windows}")
 
     depth_res_list = []
 
@@ -298,7 +315,10 @@ def generate_depth_sliced(
             denoise_step=model.args.denoise_step,
         )
         depth = depth_to_single_channel(outputs["depth"])
-        trimmed_start = 0 if window_idx == 0 else min(trim_frames, origin_T)
+        if offset > 0:
+            trimmed_start = 0
+        else:
+            trimmed_start = 0 if window_idx == 0 else min(trim_frames, origin_T)
         depth_res_list.append(depth[:, trimmed_start:origin_T])
 
     depth_list_aligned = None
@@ -424,6 +444,44 @@ def predict_depth(model, input_tensor, args):
     return depth
 
 
+def _save_blue_depth_worker(args):
+    output_pattern, frame_number, blue_frame = args
+    output_path = format_sequence_path(output_pattern, frame_number)
+    add_blue_channel_to_depth_exr(output_path, blue_frame)
+    return output_path
+
+
+def save_blue_depth_sequence(depth, frame_numbers, output_pattern, workers=None):
+    """Write depth into the blue channel of existing EXR files."""
+    depth = np.asarray(depth, dtype=np.float32)
+    if depth.ndim == 4 and depth.shape[-1] == 1:
+        depth = depth[..., 0]
+
+    if len(depth) != len(frame_numbers):
+        raise ValueError("Depth frame count does not match input frame count.")
+
+    if workers is None:
+        workers = min(os.cpu_count() or 4, len(frame_numbers))
+
+    work = [
+        (output_pattern, frame_number, depth_frame)
+        for frame_number, depth_frame in zip(frame_numbers, depth)
+    ]
+
+    if len(work) <= 2:
+        outputs = [_save_blue_depth_worker(args) for args in tqdm(work, desc="Writing blue channel")]
+    else:
+        with Pool(workers) as pool:
+            outputs = list(
+                tqdm(
+                    pool.imap(_save_blue_depth_worker, work),
+                    total=len(work),
+                    desc="Writing blue channel",
+                )
+            )
+    return outputs
+
+
 def save_results(depth, frame_numbers, args):
     outputs = save_depth_sequence(depth, frame_numbers, args.output_sequence)
     print(f"Saved {len(outputs)} EXR frames to pattern {args.output_sequence}")
@@ -447,6 +505,12 @@ def parse_args():
     )
     parser.add_argument("--start", type=int)
     parser.add_argument("--end", type=int)
+    parser.add_argument(
+        "--double",
+        action="store_true",
+        help="Run a second offset pass (shifted by half the window size) and store "
+             "its depth in the blue channel. Useful for blending away temporal artifacts.",
+    )
     return parser.parse_args()
 
 
@@ -464,8 +528,39 @@ def main():
 
     model = load_model(args.ckpt, yaml_args)
     input_tensor, frame_numbers = load_exr_data(args)
+
+    # First pass: normal inference -> red channel
     depth = predict_depth(model, input_tensor, args)
     save_results(depth, frame_numbers, args)
+
+    if args.double:
+        # Second pass: offset by half window size -> blue channel
+        offset = args.window_size // 2
+        print(f"\n=== Double pass: running offset inference (offset={offset}) ===")
+        depth_offset = generate_depth_sliced(
+            model,
+            input_tensor,
+            args.window_size,
+            args.overlap,
+            trim_frames=args.trim_frames,
+            offset=offset,
+        )[0]
+        print(f"offset depth range {depth_offset.min()} - {depth_offset.max()}, "
+              f"shape {depth_offset.shape}")
+
+        # Scale/shift align offset pass to match the first pass
+        scale, shift = compute_scale_and_shift(depth_offset, depth)
+        scale = np.clip(scale, 0.7, 1.5)
+        depth_offset_aligned = depth_offset * scale + shift
+        depth_offset_aligned[depth_offset_aligned < 0] = 0
+        print(f"offset alignment: scale={scale:.6f}, shift={shift:.6f}")
+        print(f"aligned offset range {depth_offset_aligned.min()} - "
+              f"{depth_offset_aligned.max()}")
+
+        outputs = save_blue_depth_sequence(
+            depth_offset_aligned, frame_numbers, args.output_sequence
+        )
+        print(f"Wrote blue channel to {len(outputs)} EXR frames")
 
     print("Inference completed successfully!")
 
