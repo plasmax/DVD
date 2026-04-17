@@ -29,6 +29,7 @@ configs/infinigen_val.txt
 *.mp4
 *.pdf
 *.png
+*.bak
 *.nfs*
 ckpt/DVD
 .msc
