@@ -9,6 +9,9 @@ import matplotlib.pyplot as plt
 from matplotlib.patches import Patch
 
 
+BEGINNING_PATCH_SIZE = 45
+
+
 def get_window_index(total_frames, window_size, overlap):
     if total_frames <= window_size:
         return [(0, total_frames)]
@@ -40,6 +43,17 @@ def get_overlap_patch_windows(total_frames, target_windows, patch_margin):
             (max(0, start - patch_margin), min(total_frames, end + patch_margin))
         )
     return windows
+
+
+def get_beginning_patch_window(total_frames, patch_size=BEGINNING_PATCH_SIZE):
+    if patch_size <= 0:
+        return []
+    if total_frames < patch_size:
+        raise ValueError(
+            f"Need at least {patch_size} total frames for the beginning offset patch, "
+            f"but got {total_frames}."
+        )
+    return [(0, patch_size)]
 
 
 def overlap_lengths(windows):
@@ -176,10 +190,14 @@ def main():
     depth_windows = get_window_index(args.total_frames, args.window_size, args.overlap)
     output_windows = depth_windows.copy()
     if args.double:
-        offset_windows = get_overlap_patch_windows(
+        beginning_patch_windows = get_beginning_patch_window(args.total_frames)
+        overlap_patch_windows = get_overlap_patch_windows(
             args.total_frames, depth_windows, args.patch_margin
         )
+        offset_windows = beginning_patch_windows + overlap_patch_windows
     else:
+        beginning_patch_windows = []
+        overlap_patch_windows = []
         offset_windows = []
 
     print("Normal pass inference/output windows:")
@@ -189,9 +207,12 @@ def main():
     if offset_windows:
         print("\nDouble overlap repair patches:")
         print("\n".join(format_windows(offset_windows, args.first_frame)))
+        if beginning_patch_windows:
+            print(f"Beginning artifact patch size: {BEGINNING_PATCH_SIZE}")
         print(f"Patch margin: {args.patch_margin}")
-        print("Normal overlap coverage by independent offset patches:")
-        print("\n".join(format_patch_coverage(depth_windows, offset_windows)))
+        if overlap_patch_windows:
+            print("Normal overlap coverage by independent offset patches:")
+            print("\n".join(format_patch_coverage(depth_windows, overlap_patch_windows)))
 
     fig, ax = plt.subplots(figsize=(16, 4.8))
     for start, end in get_overlap_regions(output_windows):
@@ -234,7 +255,8 @@ def main():
         "DVD inference windows: "
         f"T={args.total_frames}, window_size={args.window_size}, "
         f"overlap={args.overlap}, double={args.double}, "
-        f"patch_margin={args.patch_margin}"
+        f"patch_margin={args.patch_margin}, "
+        f"beginning_patch_size={BEGINNING_PATCH_SIZE}"
     )
     ax.grid(axis="x", linestyle="--", alpha=0.35)
     legend_handles = [
