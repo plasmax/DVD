@@ -28,6 +28,9 @@ except ModuleNotFoundError:
                      linear_to_srgb, read_exr_rgb, save_depth_exr)
 
 
+BEGINNING_PATCH_SIZE = 45
+
+
 # =============================
 # Helper: Math & Alignment
 # =============================
@@ -221,11 +224,38 @@ def get_overlap_regions(windows):
     return regions
 
 
-def get_overlap_patch_windows(T, windows, patch_margin=5):
-    return [
-        (max(0, start - patch_margin), min(T, end + patch_margin))
-        for start, end in get_overlap_regions(windows)
+def get_beginning_patch_window(T):
+    if T < BEGINNING_PATCH_SIZE:
+        raise ValueError(
+            f"Need at least {BEGINNING_PATCH_SIZE} frames for the beginning "
+            f"offset patch, but got {T}."
+        )
+    return (0, BEGINNING_PATCH_SIZE)
+
+
+def get_offset_patch_specs(T, windows, patch_margin=5):
+    beginning_patch_window = get_beginning_patch_window(T)
+    specs = [
+        {
+            "kind": "beginning",
+            "infer_window": beginning_patch_window,
+            "write_window": beginning_patch_window,
+        }
     ]
+
+    for overlap_start, overlap_end in get_overlap_regions(windows):
+        specs.append(
+            {
+                "kind": "overlap",
+                "infer_window": (
+                    max(0, overlap_start - patch_margin),
+                    min(T, overlap_end + patch_margin),
+                ),
+                "write_window": (overlap_start, overlap_end),
+            }
+        )
+
+    return specs
 
 
 # =============================
@@ -352,22 +382,25 @@ def generate_overlap_patch_depth(
 ):
     T = input_rgb.shape[1]
     normal_windows = get_window_index(T, window_size, overlap)
-    patch_windows = get_overlap_patch_windows(T, normal_windows, patch_margin)
+    patch_specs = get_offset_patch_specs(T, normal_windows, patch_margin)
+    patch_windows = [spec["infer_window"] for spec in patch_specs]
     print(f"normal_windows {normal_windows}")
-    print(f"overlap_patch_windows {patch_windows}")
+    print(f"offset_patch_windows {patch_windows}")
 
     if not patch_windows:
         print("No overlap patches needed; copying reference depth.")
         return reference_depth.copy()
 
     patch_depths = infer_depth_windows(
-        model, input_rgb, patch_windows, desc="Inferencing Overlap Patches"
+        model, input_rgb, patch_windows, desc="Inferencing Offset Patches"
     )
     patched_depth = reference_depth.copy()
 
-    for i, (patch_depth, (start, end)) in enumerate(
-        zip(patch_depths, patch_windows), start=1
+    for i, (patch_depth, spec) in enumerate(
+        zip(patch_depths, patch_specs), start=1
     ):
+        start, end = spec["infer_window"]
+        write_start, write_end = spec["write_window"]
         patch_depth = patch_depth[0]
         ref_patch = reference_depth[start:end]
 
@@ -379,8 +412,13 @@ def generate_overlap_patch_depth(
         diff = np.abs(aligned_patch - ref_patch)
         mae_scalar = float(diff.mean())
 
-        print(f"\n[Overlap Patch {i}]")
-        print(f"patch start: {start}, end: {end}, length: {end - start}")
+        print(f"\n[Offset Patch {i}]")
+        print(f"patch kind: {spec['kind']}")
+        print(f"infer start: {start}, end: {end}, length: {end - start}")
+        print(
+            f"write start: {write_start}, end: {write_end}, "
+            f"length: {write_end - write_start}"
+        )
         print(f"scale = {scale:.8f}, shift = {shift:.8f}")
         print(f"patch MAE(after align to normal pass) = {mae_scalar:.6f}")
         print(
@@ -388,7 +426,11 @@ def generate_overlap_patch_depth(
             f"{aligned_patch.max():.6f}"
         )
 
-        patched_depth[start:end] = aligned_patch
+        local_write_start = write_start - start
+        local_write_end = write_end - start
+        patched_depth[write_start:write_end] = aligned_patch[
+            local_write_start:local_write_end
+        ]
 
     return patched_depth
 
